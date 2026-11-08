@@ -1,0 +1,25 @@
+{
+    "Metadata": {
+        "Name": "INBOUND_MAIL",
+        "CreatedTimestamp": "2026-01-01T15:22:53.477000+00:00"
+    },
+    "Rules": [
+        {
+            "Name": "m-3951844311cf4406a7982573f536e2b0",
+            "Enabled": true,
+            "TlsPolicy": "Optional",
+            "Recipients": [
+                "versiful.awsapps.com",
+                "versiful.io"
+            ],
+            "Actions": [
+                {
+                    "WorkmailAction": {
+                        "OrganizationArn": "arn:aws:workmail:us-east-1:018908982481:organization/m-3951844311cf4406a7982573f536e2b0"
+                    }
+                }
+            ],
+            "ScanEnabled": false
+        }
+    ]
+}

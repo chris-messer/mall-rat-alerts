@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mall Rat Alerts - free unofficial fan text alerts</title>
+  <meta name="description" content="Mall Rat Alerts is a free, unofficial fan text alert service. Current campaign: Twilight Town Mall website alerts. Text FOB to (833) 596-1548 to join.">
+  <meta name="theme-color" content="#15110e">
+  <link rel="stylesheet" href="/assets/style.css?v=20261108b">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="preload" href="/assets/fonts/anton-400.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/assets/fonts/atkinson-400.woff2" as="font" type="font/woff2" crossorigin>
+  <script src="/assets/app.js?v=20261108b" defer></script>
+  <!--TURNSTILE_SCRIPT-->
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="/"><span class="token" aria-hidden="true">MR</span><span class="brand-name">Mall Rat Alerts</span></a>
+    <span class="tag">free unofficial fan alerts</span>
+  </header>
+
+  <!--TIP_JAR-->
+
+  <main class="wrap">
+    <section class="hero" id="join">
+      <div class="hero-copy">
+        <h1>Know when the mall <span class="hl">changes.</span></h1>
+        <p class="lede">Free fan alerts when the Twilight Town Mall on falloutboy.com changes.</p>
+        <!--DISCORD_CTA-->
+        <details class="sms-details" id="sms-signup"<!--SMS_OPEN-->>
+          <summary>Don't have Discord? Join our limited SMS alert spots.</summary>
+          <div class="sms-details-body">
+            <p class="sms-spots-note">Spots are limited because each text costs money.</p>
+            <div class="sms-cta cta-phone">
+              <a class="pill" href="sms:+18335961548?&amp;body=FOB" data-sms-cta="hero">Subscribe Now</a>
+              <p class="sms-disclosure">By texting FOB you agree to receive recurring automated text alerts from Mall Rat Alerts about changes to the Fall Out Boy website. Message frequency varies. Msg &amp; data rates may apply. Reply STOP to cancel, HELP for help. Consent is not a condition of purchase. You must be 18 or older. Unofficial fan project. See the <a href="/sms-terms/">SMS Terms</a>, <a href="/terms/">Terms</a>, and <a href="/privacy/">Privacy Policy</a>.</p>
+            </div>
+
+            <div class="sms-cta cta-desktop">
+              <form id="subscribe-form" method="post" action="/api/subscribe">
+                <input type="hidden" name="campaign_id" value="fob-twilight-town-mall-2026">
+                <input type="hidden" name="consent_version" value="sms-consent-2026-11-06.v2">
+                <input type="hidden" name="form_version" value="landing-2026-11-06.v2">
+                <input type="hidden" name="form_rendered_at" value="">
+                <input type="hidden" name="landing_path" value="">
+                <input type="hidden" name="referrer" value="">
+                <input type="hidden" name="utm_source" value="">
+                <input type="hidden" name="utm_medium" value="">
+                <input type="hidden" name="utm_campaign" value="">
+                <input type="hidden" name="utm_term" value="">
+                <input type="hidden" name="utm_content" value="">
+                <div class="hp" aria-hidden="true">
+                  <label for="website">Leave this field empty</label>
+                  <input type="text" id="website" name="website" tabindex="-1" autocomplete="off">
+                </div>
+
+                <label for="phone" class="field-label">Mobile number (US)</label>
+                <input type="tel" id="phone" name="phone" inputmode="tel" autocomplete="tel" placeholder="(555) 555-5555" required maxlength="25">
+
+                <div class="check">
+                  <input type="checkbox" id="consent" name="consent" value="yes" required>
+                  <label for="consent" id="consent-text">Yes, text me Mall Rat Alerts for the Twilight Town Mall campaign: unofficial alerts when the falloutboy.com website changes, sent to this number. We will text this number once to confirm, and I only get alerts after I reply YES. Recurring automated texts. Msg frequency varies (up to 6/day during big drops). Msg &amp; data rates may apply. Reply HELP for help, STOP to cancel anytime. Consent is not a condition of any purchase. I agree to the <a href="/sms-terms/">SMS Terms</a>, <a href="/terms/">Terms</a>, and <a href="/privacy/">Privacy Policy</a>.</label>
+                </div>
+
+                <div class="check">
+                  <input type="checkbox" id="age" name="age_18_plus" value="yes" required>
+                  <label for="age">I'm 18 or older.</label>
+                </div>
+
+                <!--TURNSTILE_WIDGET-->
+
+                <button type="submit" class="pill">Subscribe Now</button>
+                <p id="form-status" class="form-status" role="alert" aria-live="polite"></p>
+              </form>
+              <p class="pill-fallback">On a computer? Text <strong>FOB</strong> to <strong class="nowrap">(833) 596-1548</strong> from your phone.</p>
+            </div>
+          </div>
+        </details>
+      </div>
+
+      <div class="hero-art" aria-hidden="true">
+        <div class="crate-card">
+          <div class="vinyl"><div class="vinyl-label"><b>MRA</b><span>Side A</span><span>33 1/3</span></div></div>
+          <div class="sleeve">
+            <span class="sleeve-kicker">Mall Rat Alerts presents</span>
+            <span class="sleeve-title">New<br>Arrivals</span>
+            <span class="sleeve-foot">Twilight Town Mall / Store 04</span>
+          </div>
+          <span class="price-tag"><small>Price</small>FREE<small>$0.00</small></span>
+          <span class="hand-sticker">staff pick</span>
+        </div>
+      </div>
+    </section>
+
+    <div class="shelves">
+      <details class="shelf" id="recent" open>
+        <summary><span class="shelf-label">Recent alerts</span></summary>
+        <div class="shelf-body">
+          <section id="recent-alerts" class="receipt-feed" aria-label="Recent alerts" data-campaign="fob-twilight-town-mall-2026">
+            <div class="receipt-head" aria-hidden="true">
+              <span>Twilight Town Mall Music</span>
+              <span>New arrivals / newest first</span>
+            </div>
+            <ol id="alert-list" class="alert-list" aria-live="polite">
+              <li class="alert-empty">Loading recent alerts...</li>
+            </ol>
+            <noscript><p class="small">This list needs JavaScript. Raw feed: <a href="/api/alerts?campaign_id=fob-twilight-town-mall-2026&amp;limit=50">/api/alerts</a>.</p></noscript>
+            <p class="small">Times are Pacific. Alerts are live and go out by text when the site changes.</p>
+          </section>
+        </div>
+      </details>
+
+      <details class="shelf" id="how-it-works">
+        <summary><span class="shelf-label">How it works</span></summary>
+        <div class="shelf-body">
+          <ol class="steps">
+            <li><strong>Join.</strong> On a phone, tap Subscribe Now and send the text. On a computer, enter your number.</li>
+            <li><strong>Confirm.</strong> Computer sign-ups get one text asking you to reply YES. After that, alerts go out by text when the site changes.</li>
+            <li><strong>Get a text when the mall changes.</strong> Up to 6 a day during big drops, at any hour.</li>
+          </ol>
+          <div class="sample-card">
+            <p class="sample-label">Sample alert</p>
+            <p class="sms-text">Aces Hifi Records is now open. Look for store 04 at falloutboy.com/aces-hifi-records
+
+Thnks fr th mmrs.</p>
+          </div>
+        </div>
+      </details>
+
+      <details class="shelf" id="faq">
+        <summary><span class="shelf-label">FAQ</span></summary>
+        <div class="shelf-body faq">
+          <h3>How do I join?</h3>
+          <p>Join the Discord for free alerts in a channel, or open the SMS option and text FOB / enter your number. SMS only after you text FOB or reply YES.</p>
+          <h3>Discord or SMS?</h3>
+          <p>Discord gets every alert with room to spare. SMS spots are limited because each text costs money.</p>
+          <h3>What does it cost?</h3>
+          <p>Nothing. Carrier message and data rates may apply for SMS.</p>
+          <h3>How do I stop?</h3>
+          <p>Reply STOP to any text, or use the <a href="/unsubscribe/">unsubscribe page</a>. Leave the Discord server anytime.</p>
+          <h3>Is this official?</h3>
+          <p>No. It is run by fans. Official news lives at <a href="https://www.falloutboy.com" rel="noopener">falloutboy.com</a>.</p>
+          <h3>Can alerts be wrong?</h3>
+          <p>Yes. They come from automated website checks and may be late or miss things.</p>
+        </div>
+      </details>
+    </div>
+  </main>
+
+  <footer class="footer">
+    <p class="disclaimer">Mall Rat Alerts is an unofficial fan project. It is not affiliated with, endorsed by, or sponsored by Fall Out Boy, their management, their record labels, or any artist or website we watch.</p>
+    <nav><a href="/privacy/">Privacy</a> <a href="/terms/">Terms</a> <a href="/sms-terms/">SMS Terms</a> <a href="/unsubscribe/">Unsubscribe</a> <a href="mailto:hello@mallratalerts.com">hello@mallratalerts.com</a></nav>
+  </footer>
+</body>
+</html>

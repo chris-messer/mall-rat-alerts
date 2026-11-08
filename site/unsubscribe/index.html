@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#14110f">
+  <title>Unsubscribe - Mall Rat Alerts</title>
+  <link rel="stylesheet" href="/assets/style.css?v=20261106d">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <script src="/assets/app.js?v=20261106d" defer></script>
+  <!--TURNSTILE_SCRIPT-->
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="/"><span class="token" aria-hidden="true">MR</span><span class="brand-name">Mall Rat Alerts</span></a>
+    <span class="tag">free unofficial fan alerts</span>
+  </header>
+
+  <main class="wrap">
+    <section class="card">
+      <h1>Unsubscribe</h1>
+      <p>Enter your number to stop texts for the <strong>Twilight Town Mall</strong> campaign. This only opts you out of this campaign. It does not sign you up for, or out of, any other Mall Rat Alerts campaign.</p>
+      <p>The fastest way is to reply <strong>STOP</strong> to any text from us. Replying STOP stops all texts from that number.</p>
+
+      <form id="unsubscribe-form" method="post" action="/api/unsubscribe">
+        <input type="hidden" name="campaign_id" value="fob-twilight-town-mall-2026">
+        <div class="hp" aria-hidden="true">
+          <label for="website">Leave this field empty</label>
+          <input type="text" id="website" name="website" tabindex="-1" autocomplete="off">
+        </div>
+
+        <label for="phone" class="field-label">Mobile number (US)</label>
+        <input type="tel" id="phone" name="phone" inputmode="tel" autocomplete="tel-national" placeholder="(555) 555-5555" required maxlength="25">
+
+        <!--TURNSTILE_WIDGET-->
+
+        <button type="submit" class="btn">Unsubscribe from Twilight Town Mall alerts</button>
+        <p id="form-status" class="form-status" role="alert" aria-live="polite"></p>
+      </form>
+      <p class="small">Want off every Mall Rat Alerts campaign at once? Reply STOP to any text, or email <a href="mailto:hello@mallratalerts.com">hello@mallratalerts.com</a>.</p>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <p class="disclaimer">Mall Rat Alerts is an unofficial fan project. It is not affiliated with, endorsed by, or sponsored by Fall Out Boy, their management, their record labels, or any artist or website we watch.</p>
+    <nav><a href="/privacy/">Privacy</a> <a href="/terms/">Terms</a> <a href="/sms-terms/">SMS Terms</a> <a href="/unsubscribe/">Unsubscribe</a> <a href="mailto:hello@mallratalerts.com">hello@mallratalerts.com</a></nav>
+  </footer>
+</body>
+</html>

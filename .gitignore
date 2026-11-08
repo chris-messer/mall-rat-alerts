@@ -1,0 +1,39 @@
+terraform/.terraform/
+terraform/build/
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/*.tfplan
+__pycache__/
+.env
+*.tfvars
+contact.json
+
+# Secrets and env files
+.env.*
+!.env.example
+*.pem
+*.key
+credentials*
+
+# Terraform
+*.tfstate
+*.tfstate.*
+*.tfplan
+.terraform/
+terraform.tfvars
+crash.log
+crash.*.log
+
+# Build artifacts
+*.zip
+build/
+dist/
+
+# Python
+.venv/
+venv/
+*.pyc
+
+# OS / tooling
+.DS_Store
+node_modules/

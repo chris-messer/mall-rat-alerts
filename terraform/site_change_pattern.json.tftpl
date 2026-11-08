@@ -1,0 +1,11 @@
+{
+  "source": ["fob-site-monitor"],
+  "detail-type": ["SiteChange"],
+  "detail": {
+    "campaign_id": ["${campaign_id}"],
+    "$or": [
+      {"test": [false]},
+      {"test": [{"exists": false}]}
+    ]
+  }
+}
