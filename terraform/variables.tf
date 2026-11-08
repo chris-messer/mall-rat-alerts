@@ -143,7 +143,7 @@ variable "discord_invite_url" {
   type        = string
   default     = ""
   validation {
-    condition = var.discord_invite_url == "" || can(regex("^https://discord\\.(gg|com/invite)/[A-Za-z0-9_-]+/?$", var.discord_invite_url))
+    condition     = var.discord_invite_url == "" || can(regex("^https://discord\\.(gg|com/invite)/[A-Za-z0-9_-]+/?$", var.discord_invite_url))
     error_message = "discord_invite_url must be empty or start with https://discord.gg/ or https://discord.com/invite/."
   }
 }
