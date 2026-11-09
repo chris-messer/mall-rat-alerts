@@ -31,6 +31,7 @@ from decimal import Decimal
 import boto3
 
 from common import alert_text
+from common import analytics
 from common import discord
 from common import fanout
 from common import llm_trace
@@ -309,11 +310,30 @@ def discord_text_for(fields):
     return text
 
 
+def _discord_skipped(campaign_id, sent_at, reason):
+    try:
+        analytics.capture("alert_discord_skipped", analytics.alert_distinct_id(campaign_id, sent_at), {
+            "campaign_id": campaign_id, "alert_id": sent_at, "channel": "alerts",
+            "skipped": True, "skipped_reason": reason})
+    except Exception as e:
+        log.warning("discord skip posthog track failed (%s)", type(e).__name__)
+
+
 def discord_hook(alerts_table, fields, campaign_id, sent_at, cfg, is_test, event_dry_run=False):
     """Mirror a real, published alert to the campaign's Discord channel. Runs after the alert is stored and the
     fan-out job is enqueued. Skips test events and dry runs (event flag or ops fanout_mode dry_run). Never raises."""
     try:
-        if is_test or event_dry_run or fanout.mode_of(cfg) == "dry_run" or fields.get("status") != "published":
+        if is_test:
+            _discord_skipped(campaign_id, sent_at, "test")
+            return None
+        if event_dry_run:
+            _discord_skipped(campaign_id, sent_at, "event_dry_run")
+            return None
+        if fanout.mode_of(cfg) == "dry_run":
+            _discord_skipped(campaign_id, sent_at, "fanout_dry_run")
+            return None
+        if fields.get("status") != "published":
+            _discord_skipped(campaign_id, sent_at, fields.get("suppressed_reason") or "not_published")
             return None
         return discord.post_public_alert(campaign_id, discord_text_for(fields), sent_at, alerts_table)
     except Exception as e:
@@ -366,6 +386,8 @@ def handler(event, context):
     if fields.get("status") == "published":
         fanout_hook({**fields, "campaign_id": campaign_id, "sent_at": sent_at}, cfg)
         discord_hook(t["alerts"], fields, campaign_id, sent_at, cfg, is_test, bool(detail.get("dry_run")))
+    else:
+        _discord_skipped(campaign_id, sent_at, fields.get("suppressed_reason") or "suppressed")
     return {"stored": True, "campaign_id": campaign_id, "sent_at": sent_at, "segments": built["segments"],
             "encoding": built["encoding"], "model": built["model"], "test": is_test,
             "status": fields.get("status")}

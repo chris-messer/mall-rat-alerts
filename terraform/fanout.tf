@@ -165,6 +165,8 @@ resource "aws_lambda_function" "fanout_worker" {
       TWILIO_TOKEN_KEY    = var.twilio_token_key
       TWILIO_FROM_NUMBER  = var.twilio_from_number
       TWILIO_WEBHOOK_BASE = local.public_base
+      POSTHOG_KEY         = var.posthog_key
+      POSTHOG_HOST        = var.posthog_host
     }
   }
 

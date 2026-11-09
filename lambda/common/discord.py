@@ -16,6 +16,8 @@ import time
 import urllib.error
 import urllib.request
 
+from common import analytics
+
 log = logging.getLogger()
 
 # Discord limits: content 2000; embed title 256; description 4096; footer 2048;
@@ -165,6 +167,15 @@ def _release(table, campaign_id, alert_id):
         log.warning("discord marker release failed (%s)", type(e).__name__)
 
 
+def _track(event, campaign_id, alert_id, **props):
+    """PostHog for Discord posts/skips. Fail-open; never includes webhook URLs or message bodies."""
+    try:
+        analytics.capture(event, analytics.alert_distinct_id(campaign_id, alert_id), {
+            "campaign_id": campaign_id, "alert_id": alert_id, "channel": "alerts", **props})
+    except Exception as e:
+        log.warning("discord posthog track failed (%s)", type(e).__name__)
+
+
 def post_public_alert(campaign_id, text, alert_id, table=None):
     """Post one public alert. alert_id is the alert's sent_at (its sort key). `table` is the alerts table; when
     given, a conditional marker (discord_posted_at) makes the post at-most-once. Returns the HTTP status code
@@ -173,14 +184,18 @@ def post_public_alert(campaign_id, text, alert_id, table=None):
         secret_key = channel_map().get(campaign_id)
         if not secret_key:
             log.info("discord skipped: campaign not mapped")
+            _track("alert_discord_skipped", campaign_id, alert_id, skipped=True, skipped_reason="unmapped")
             return None
         url = _webhook_for(secret_key)
         if not url:
+            _track("alert_discord_skipped", campaign_id, alert_id, skipped=True, skipped_reason="no_webhook")
             return None
         if table is not None and not _claim(table, campaign_id, alert_id):
             log.info("discord skipped: already posted or marker unavailable")
+            _track("alert_discord_skipped", campaign_id, alert_id, skipped=True, skipped_reason="already_posted")
             return None
         body = payload_for(campaign_id, text, alert_id)
+        desc = ((body.get("embeds") or [{}])[0].get("description") or "")
         status, retry_after = _send(url, body)
         if status == 429 and retry_after is not None and retry_after <= MAX_RETRY_AFTER_SECONDS:
             time.sleep(max(retry_after, 0))
@@ -191,6 +206,9 @@ def post_public_alert(campaign_id, text, alert_id, table=None):
             _secret_cache.pop(secret_key, None)  # webhook rotated or deleted: re-read the secret next time
         if not ok and status is not None and table is not None:
             _release(table, campaign_id, alert_id)  # definite failure, safe to retry; a timeout keeps the claim
+        if ok:
+            _track("alert_discord_posted", campaign_id, alert_id, http_status=status,
+                   body_chars=len(desc), skipped=False)
         return status
     except Exception as e:  # last resort: nothing here may reach the composer
         log.warning("discord post error (%s)", type(e).__name__)

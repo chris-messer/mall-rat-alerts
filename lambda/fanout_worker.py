@@ -35,6 +35,7 @@ from decimal import Decimal
 import boto3
 from botocore.exceptions import ClientError
 
+from common import analytics
 from common import fanout
 from common import store
 from common import twilio_send
@@ -429,6 +430,15 @@ def alert_id_of(job):
     return f"{job['campaign_id']}#{job['sent_at']}"
 
 
+def _track_sms_blast(alert_id, campaign_id, mode, **props):
+    """Blast-level PostHog event. Never includes phone numbers. Fail-open."""
+    try:
+        analytics.capture("alert_sms_blast", f"fanout:{alert_id}", {
+            "campaign_id": campaign_id, "alert_id": alert_id, "fanout_mode": mode, **props})
+    except Exception as e:
+        log.warning("fanout posthog track failed (%s)", type(e).__name__)
+
+
 def handler(event, context):
     results = []
     for record in (event or {}).get("Records", []):
@@ -489,13 +499,15 @@ def run(t, job, cfg, mode, context):
             return refuse(t, job, mode, "daily_cap")
         if not dry:
             set_run(t["sends"], alert_id, "running", recipients=recipients, segments=segments)
-        job = {**job, "mode": mode, "started_at": started_at, "cursor": None,
+        job = {**job, "mode": mode, "started_at": started_at, "cursor": None, "segments": segments,
                "counts": {"recipients": recipients, "would_send": 0, "would_skip": 0, "daily_cap_ok": quota_ok}}
         est = round(fanout.estimate_seconds(recipients, segments, rate), 1)
         _log("started", mode=mode, campaign_id=cid, recipients=recipients, segments=segments, rate=rate,
              estimated_seconds=est, daily_cap_ok=quota_ok)
         _audit(t, cid, "fanout_started", alert_sent_at=sent_at, mode=mode, recipients=recipients, segments=segments,
                estimated_seconds=str(est))
+        _track_sms_blast(alert_id, cid, mode, phase="started", recipient_count=recipients,
+                         segments_per_message=segments)
     elif not dry:
         row = t["sends"].get_item(Key={"alert_id": alert_id, "phone": RUN_SK}, ConsistentRead=True).get("Item") or {}
         if row.get("status") in ("completed", "refused"):
@@ -561,6 +573,7 @@ def run(t, job, cfg, mode, context):
 def finish(t, job, mode, counts):
     cid, sent_at, alert_id = job["campaign_id"], job["sent_at"], alert_id_of(job)
     finished_at = store.now_iso(_now())
+    segments = job.get("segments")
     if mode == "dry_run":
         dry_counts = {"recipients": counts.get("recipients", 0), "would_send": counts.get("would_send", 0),
                       "would_skip": counts.get("would_skip", 0), "daily_cap_ok": bool(counts.get("daily_cap_ok"))}
@@ -569,6 +582,12 @@ def finish(t, job, mode, counts):
         log.info("fanout dry_run: would send %d (skip %d, recipients %d)", dry_counts["would_send"],
                  dry_counts["would_skip"], dry_counts["recipients"])
         _audit(t, cid, "fanout_dry_run", alert_sent_at=sent_at, mode=mode, **dry_counts)
+        props = {"phase": "completed", "recipient_count": dry_counts["recipients"],
+                 "sent_count": 0, "failed_count": 0, "skipped_count": dry_counts["would_skip"],
+                 "would_send": dry_counts["would_send"]}
+        if segments is not None:
+            props["segments_per_message"] = segments
+        _track_sms_blast(alert_id, cid, mode, **props)
         return {"dry_run": dry_counts}
 
     final = tally(t["sends"], alert_id)
@@ -584,4 +603,9 @@ def finish(t, job, mode, counts):
          opted_out=final["opted_out"], unknown=final["unknown"])
     _audit(t, cid, "fanout_completed", alert_sent_at=sent_at, mode=mode, recipients=fields["recipients"],
            sent=final["sent"], failed=final["failed"], skipped=final["skipped"], opted_out=final["opted_out"])
+    props = {"phase": "completed", "recipient_count": fields["recipients"], "sent_count": final["sent"],
+             "failed_count": final["failed"], "skipped_count": final["skipped"]}
+    if segments is not None:
+        props["segments_per_message"] = segments
+    _track_sms_blast(alert_id, cid, mode, **props)
     return {"completed": fields}
