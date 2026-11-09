@@ -292,6 +292,22 @@ class ComposerGatingTest(Base):
         self.assertIsNone(ac.discord_hook(self.alerts, {"status": "draft", "message": "x"}, CAMPAIGN, SENT_AT, None, False))
         self.assertEqual(self.posts, [])
 
+    def test_notify_false_skips_discord_and_fanout(self):
+        order = []
+        orig = ac.fanout_hook
+        ac.fanout_hook = lambda *a, **k: order.append("fanout")
+        ac._bedrock["c"] = FakeBedrock(reply({**GOOD, "notify": False}))
+        try:
+            res = ac.handler(self.event("nf"), None)
+        finally:
+            ac.fanout_hook = orig
+        self.assertEqual(order, [])
+        self.assertEqual(self.posts, [])
+        self.assertEqual(res["status"], "suppressed")
+        stored = self.alerts.items[(CAMPAIGN, res["sent_at"])]
+        self.assertEqual(stored["status"], "suppressed")
+        self.assertNotIn("Something changed on", stored["what_changed"])
+
     def test_discord_text_prefers_full_body_and_appends_site_url(self):
         fields = {"discord_message": "Full site-change summary.\n\nThnks fr th mmrs.",
                   "message": "Short SMS.",

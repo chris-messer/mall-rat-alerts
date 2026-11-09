@@ -84,12 +84,15 @@ class FakeTable:
     def put_item(self, Item, ConditionExpression=None, ExpressionAttributeValues=None,
                  ExpressionAttributeNames=None, **kw):
         self.calls.append(("put_item", Item))
+        old = copy.deepcopy(self.items.get(self._key(Item)))
         if ConditionExpression:
             current = self.items.get(self._key(Item))
             names, values = ExpressionAttributeNames or {}, ExpressionAttributeValues or {}
             if not self._eval_cond(ConditionExpression, current or {}, lambda n: names.get(n, n), lambda v: values[v]):
                 raise ClientError("ConditionalCheckFailedException")
         self.items[self._key(Item)] = copy.deepcopy(Item)
+        if kw.get("ReturnValues") == "ALL_OLD" and old is not None:
+            return {"Attributes": old}
         return {}
 
     def delete_item(self, Key, **kw):
@@ -113,6 +116,8 @@ class FakeTable:
         if ConditionExpression and not self._eval_cond(ConditionExpression, item if exists else {}, name, val):
             raise ClientError("ConditionalCheckFailedException")
 
+        touched = set()
+        before = copy.deepcopy(current)
         clauses = re.split(r"\b(SET|ADD|REMOVE)\b", UpdateExpression)
         it = iter(c.strip() for c in clauses if c.strip())
         for kind in it:
@@ -120,15 +125,20 @@ class FakeTable:
             if kind == "SET":
                 for assign in _split_top(body):
                     lhs, rhs = [x.strip() for x in assign.split("=", 1)]
+                    touched.add(name(lhs))
                     item[name(lhs)] = self._eval_value(rhs, item, name, val)
             elif kind == "ADD":
                 for part in _split_top(body):
                     attr, v = part.split()
+                    touched.add(name(attr))
                     item[name(attr)] = item.get(name(attr), 0) + val(v)
             elif kind == "REMOVE":
                 for attr in _split_top(body):
+                    touched.add(name(attr))
                     item.pop(name(attr), None)
         self.items[k] = item
+        if kw.get("ReturnValues") == "UPDATED_OLD" and exists:
+            return {"Attributes": {a: before[a] for a in touched if a in before}}
         return {}
 
     def _eval_value(self, expr, item, name, val):
@@ -157,10 +167,12 @@ class FakeTable:
         m = re.match(r"attribute_exists\(\s*([#\w]+)\s*\)$", atom)
         if m:
             return name(m.group(1)) in item
-        m = re.match(r"([#\w]+)\s*(<>|<|=)\s*(:\w+)$", atom)
+        m = re.match(r"([#\w]+)\s*(<>|<|>|=)\s*(:\w+)$", atom)
         if m:
             left = item.get(name(m.group(1)))
             right = val(m.group(3))
+            if m.group(2) == ">":
+                return left is not None and left > right
             if m.group(2) == "<":
                 return left is not None and left < right
             if m.group(2) == "<>":

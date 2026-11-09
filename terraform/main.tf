@@ -40,9 +40,10 @@ locals {
   posthog_csp_hosts   = var.posthog_key == "" ? "" : " ${var.posthog_host} ${local.posthog_assets_host}"
 }
 
-# Created empty by Terraform. scripts/load_twilio_secret.py fills it, so the token never lands in TF state.
+# Created empty by Terraform. scripts/load_twilio_secret.py and deploy-time secret merges fill keys, so
+# tokens never land in TF state. Keys include Twilio, Discord webhooks, discord_bot_token, etc.
 resource "aws_secretsmanager_secret" "twilio" {
   name                    = "${var.name}/secrets"
-  description             = "Mall Rat Alerts Twilio credentials (twilio_account_sid, twilio_auth_token)."
+  description             = "Mall Rat Alerts secrets (Twilio, Discord webhooks, discord_bot_token). Values never in TF state."
   recovery_window_in_days = 7
 }

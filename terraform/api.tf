@@ -123,6 +123,7 @@ resource "aws_lambda_function" "signup_api" {
       TWILIO_FROM_NUMBER     = var.twilio_from_number
       TWILIO_WEBHOOK_BASE    = local.public_base
       PUBLIC_SITE_URL        = local.public_base
+      DISCORD_GUILD_ID       = var.discord_guild_id
       SUPPORT_EMAIL          = var.support_email
       POSTHOG_KEY            = var.posthog_key
       POSTHOG_HOST           = var.posthog_host
@@ -154,6 +155,7 @@ resource "aws_apigatewayv2_route" "signup" {
     "POST /api/twilio/inbound",
     "POST /api/twilio/status",
     "GET /api/alerts",
+    "POST /api/discord/member-event",
   ])
   api_id    = aws_apigatewayv2_api.signup.id
   route_key = each.value

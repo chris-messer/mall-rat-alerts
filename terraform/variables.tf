@@ -138,6 +138,12 @@ variable "stripe_payment_link" {
   }
 }
 
+variable "discord_guild_id" {
+  description = "MallRatAlerts Discord server id for the scheduled count-sync Lambda (GET /guilds/{id}?with_counts=true). Also gates the unused legacy /api/discord/member-event route. Not a secret."
+  type        = string
+  default     = "1569100999606538352"
+}
+
 variable "discord_invite_url" {
   description = "Public Discord invite URL for the homepage Join the Discord CTA. Empty = hide Discord CTA and leave SMS open. Set via TF_VAR_discord_invite_url from .env."
   type        = string

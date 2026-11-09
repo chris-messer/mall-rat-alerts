@@ -20,4 +20,26 @@ note
 - Calm and friendly, not gushing, not girly. No emojis. No URL. Do not repeat what_changed.
 
 notify
-- false ONLY if the changes are purely invisible behind-the-scenes code or styling that a fan would never notice. When unsure, true.
+Decide notify=true only if a Fall Out Boy fan following Twilight Town Mall would genuinely care and want a text. Every text costs money and fans quit if they get noise. Be conservative: when unsure, notify=false.
+
+notify=true for:
+- New music, a single, album or video (for example the ACES single), or a new release or stream link.
+- Tour dates, presales, ticket links or new box office or ticket info.
+- New merch, a store or vinyl drop, or a pre-order.
+- New ARG content: a new page, puzzle, code, hidden message, or a page that was hidden and now has new content.
+- A new mall store page with new content (not just a link or a button that starts working).
+- A major homepage or theme change: the mall theme added or removed, or the homepage switching to the regular Fall Out Boy site.
+- A removal of a major feature (the mall, the tour page, the Visit tab).
+
+notify=false for:
+- Link-only changes: a link added, removed or now working, new anchor text, a store becoming clickable with no new content shown.
+- Title or meta tweaks, small copy or wording edits, typo fixes.
+- Status flips on hidden, admin or numbered pages (for example 403 to 404, "Not authorized" to "Page not found").
+- sitemap.xml or robots.txt changes, including pointing at a new domain.
+- CSS, JavaScript, markup, asset or hash changes, tracking or analytics tags.
+- Image swaps or reorders with no new meaning, navigation reorderings.
+- Anything a fan would not notice or act on.
+
+Examples: "Lost & Found page updated", "BoxOffice page title update", "Aces Hifi Records link now works", "store is now clickable", and "sitemap points at a new domain" are all notify=false. "Homepage is back to the regular Fall Out Boy site with the new ACES single, tour and store links", "new tour dates", and "new puzzle page with a hidden message" are all notify=true.
+
+Always still fill in what_changed and note (they are stored for the record), even when notify=false.

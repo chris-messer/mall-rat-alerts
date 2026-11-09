@@ -9,12 +9,15 @@ Key layout
                config#global / current            global kill switches
                config#campaign#<id> / current     campaign metadata and switches
                rl#<scope>#<campaign_id>#<key> / <window>   rate-limit counters
+               counts#<campaign_id> / current     subscriber and Discord member counts (see common/counts.py)
 """
 
 import time
 from datetime import datetime, timezone
 
 from botocore.exceptions import ClientError
+
+from common import counts
 
 CONFIG_TTL_SECONDS = 60
 CONFIG_SK = "current"
@@ -191,8 +194,13 @@ def get_subscriber(subs_table, phone, campaign_id):
     return subs_table.get_item(Key={"phone": phone, "campaign_id": campaign_id}, ConsistentRead=True).get("Item")
 
 
-def put_subscriber(subs_table, item):
-    subs_table.put_item(Item=item)
+def put_subscriber(subs_table, item, ops_table=None):
+    """Write a whole subscriber row. With `ops_table`, the campaign counter follows the real status change
+    (the old row comes back from the same PutItem, so a repeat or a race never double counts)."""
+    res = subs_table.put_item(Item=item, ReturnValues="ALL_OLD")
+    if ops_table is not None:
+        prior = ((res or {}).get("Attributes") or {}).get("status")
+        counts.record_transition(ops_table, item["campaign_id"], prior, item.get("status"))
 
 
 def refresh_pending(subs_table, phone, campaign_id, fields):
@@ -227,7 +235,7 @@ def memberships(subs_table, phone):
         kwargs["ExclusiveStartKey"] = res["LastEvaluatedKey"]
 
 
-def activate(subs_table, phone, campaign_id, from_status, at, message_sid):
+def activate(subs_table, phone, campaign_id, from_status, at, message_sid, ops_table=None):
     """PENDING/PENDING_SENDER -> ACTIVE after a YES reply. Returns False if the status changed underneath us."""
     try:
         subs_table.update_item(
@@ -241,6 +249,7 @@ def activate(subs_table, phone, campaign_id, from_status, at, message_sid):
                 ":g1": f"ACTIVE#{campaign_id}", ":g2": f"{at}#{phone}",
             },
         )
+        counts.record_transition(ops_table, campaign_id, from_status, "ACTIVE")
         return True
     except ClientError as e:
         if _is_conditional_failure(e):
@@ -248,17 +257,21 @@ def activate(subs_table, phone, campaign_id, from_status, at, message_sid):
         raise
 
 
-def mark_opted_out(subs_table, phone, campaign_id, at, method):
+def mark_opted_out(subs_table, phone, campaign_id, at, method, ops_table=None):
     """Returns True if the status changed, False if already opted out or never signed up."""
     try:
-        subs_table.update_item(
+        res = subs_table.update_item(
             Key={"phone": phone, "campaign_id": campaign_id},
             UpdateExpression="SET #s = :out, unsubscribed_at = :at, unsubscribe_method = :m, updated_at = :at "
                              "REMOVE expires_at, gsi1pk, gsi1sk",
             ConditionExpression="attribute_exists(phone) AND #s <> :out",
             ExpressionAttributeNames={"#s": "status"},
             ExpressionAttributeValues={":out": "OPTED_OUT", ":at": at, ":m": method},
+            ReturnValues="UPDATED_OLD",
         )
+        if ops_table is not None:
+            prior = ((res or {}).get("Attributes") or {}).get("status")
+            counts.record_transition(ops_table, campaign_id, prior, "OPTED_OUT")
         return True
     except ClientError as e:
         if _is_conditional_failure(e):
@@ -266,12 +279,12 @@ def mark_opted_out(subs_table, phone, campaign_id, at, method):
         raise
 
 
-def carrier_opt_out(subs_table, audit_table, phone, at, actor, message_sid=None):
+def carrier_opt_out(subs_table, audit_table, phone, at, actor, message_sid=None, ops_table=None):
     """Twilio error 21610 (the carrier says this number opted out): OPTED_OUT in every campaign.
     Returns the number of memberships changed."""
     changed = 0
     for m in memberships(subs_table, phone):
-        if mark_opted_out(subs_table, phone, m["campaign_id"], at, "CARRIER_21610"):
+        if mark_opted_out(subs_table, phone, m["campaign_id"], at, "CARRIER_21610", ops_table=ops_table):
             audit(audit_table, phone, m["campaign_id"], "carrier_21610", at, actor=actor,
                   message_sid=message_sid, new_status="OPTED_OUT")
             changed += 1

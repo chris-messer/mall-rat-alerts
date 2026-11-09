@@ -544,7 +544,7 @@ def run(t, job, cfg, mode, context):
             map_sid(t["sends"], sid, alert_id, phone)
             finish_send(t["sends"], alert_id, phone, status, message_sid=sid, error=error, segments=segments)
             if status == "OPTED_OUT":
-                store.carrier_opt_out(t["subs"], t["audit"], phone, store.now_iso(_now()), "fanout")
+                store.carrier_opt_out(t["subs"], t["audit"], phone, store.now_iso(_now()), "fanout", ops_table=t["ops"])
             last_key = key
     except Stop as stop:
         nxt = {**job, "seq": job["seq"] + 1, "cursor": last_key, "counts": counts}

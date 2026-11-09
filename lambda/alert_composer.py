@@ -4,11 +4,17 @@ EventBridge (default bus) -> this Lambda, for events {source: "fob-site-monitor"
 
   1. Idempotency marker keyed on the source event id (a duplicate delivery does nothing).
   2. Fetch the public template live from DynamoDB (falls back to the copy shipped with the code).
+  2b. Deterministic pre-filter (common/prefilter.py): obviously unimportant changes (sitemap/robots, 403/404 flips
+     on hidden pages, title-only, link-only, markup-only) skip the model and are stored as status=suppressed with
+     suppressed_reason="prefilter:<rule>".
   3. Ask Bedrock (Nova first) for {"notify", "what_changed", "note"}, tracing every attempt to PostHog.
   4. Assemble "what_changed\\n\\nnote" in code, sanitize to GSM-7, enforce the length budget.
-  5. Store the alert in the alerts table (the homepage feed reads it).
-  6. Unless ops fanout_mode is "off", enqueue one fan-out job (SQS, DelaySeconds = fanout_delay_seconds).
+  5. Store the alert in the alerts table (the homepage feed reads it). Model notify=false is stored as
+     status=suppressed (audit only; no generic fallback text).
+  6. For published alerts only: unless ops fanout_mode is "off", enqueue one fan-out job
+     (SQS, DelaySeconds = fanout_delay_seconds). Suppressed alerts skip this.
   7. Mirror real published alerts to the campaign's Discord channel (common/discord.py), after step 6.
+     Suppressed alerts are not posted.
 
 No SMS is sent from here. The fan-out worker (fanout_worker.py) re-checks every switch before each text.
 """
@@ -28,6 +34,7 @@ from common import alert_text
 from common import discord
 from common import fanout
 from common import llm_trace
+from common import prefilter
 from common import sms_text
 from common import store
 
@@ -154,12 +161,21 @@ def build_alert(bedrock, template, campaign_id, changes, priority=False, trace_p
         POSTHOG_KEY, POSTHOG_HOST, APP, DISTINCT_ID, "public_alert",
         {"campaign_id": campaign_id, "template_version": tpl.get("version"),
          "template_key": template_key(campaign_id), "template_source": tpl.get("source"), **(trace_props or {})})
-    model, model_notify, fallback, attempts, fallback_reason = None, None, False, 0, None
+    model, model_notify, fallback, attempts, fallback_reason, suppressed = None, None, False, 0, None, False
+    suppressed_reason = None
+    rule = None if priority else prefilter.evaluate(changes)
     if priority:
         what, note, model = str(tpl["visit_what"]), str(tpl["visit_note"]), "fixed:visit-tab"
+    elif rule:
+        # Audit row only: deterministic summary, no Bedrock call, no fan-out, no Discord.
+        what, _ = fallback_parts(changes, tpl)
+        note, model, suppressed = "", "prefilter", True
+        suppressed_reason = f"prefilter:{rule}"
+        log.info(json.dumps({"alert": "suppressed", "reason": suppressed_reason, "campaign_id": campaign_id}))
     else:
-        # The monitor already decided this change was worth alerting on, so the public feed always gets an
-        # entry: a model notify=false, invalid output or a compose crash all fall back to the template.
+        # Invalid output or a compose crash falls back to the template so the change is still recorded
+        # publicly. Model notify=false is different: store a suppressed audit row, no generic fallback
+        # text, and no SMS/Discord fan-out (handler gates on status).
         try:
             res = alert_text.compose(bedrock, trace, tpl, user_text_for(changes), model_order(tpl), "public",
                                      {"campaign_id": campaign_id, "template_version": tpl.get("version"), "app": APP})
@@ -169,12 +185,14 @@ def build_alert(bedrock, template, campaign_id, changes, priority=False, trace_p
         if res and res["notify"] is not False:
             what, note, model = res["what_changed"], res["note"], res["model"]
             model_notify, attempts = res["notify"], res["attempts"]
+        elif res and res["notify"] is False:
+            what, note, model = res["what_changed"], res["note"], res["model"]
+            model_notify, attempts, suppressed = False, res["attempts"], True
+            suppressed_reason = "model:notify_false"
+            log.info(json.dumps({"alert": "suppressed", "reason": "notify=false",
+                                 "model": model, "campaign_id": campaign_id}))
         else:
-            if res:
-                model_notify, attempts = False, res["attempts"]
-                fallback_reason = f"model {res['model']} returned notify=false"
-            else:
-                fallback_reason = fallback_reason or "all models failed or returned invalid output"
+            fallback_reason = fallback_reason or "all models failed or returned invalid output"
             log.warning(json.dumps({"alert": "fallback", "reason": fallback_reason, "campaign_id": campaign_id}))
             what, note = fallback_parts(changes, tpl)
             model, fallback = "fallback:template", True
@@ -187,18 +205,20 @@ def build_alert(bedrock, template, campaign_id, changes, priority=False, trace_p
     what_out, _, note_out = message.partition(alert_text.SEP)
     trace.finish(input_state={"changes": len(changes or []), "urls": _urls(changes), "priority": bool(priority)},
                  output_state={"message": message, "discord_message": discord_message, **info,
-                               "model": model, "fallback": fallback},
+                               "model": model, "fallback": fallback, "suppressed": suppressed,
+                               "suppressed_reason": suppressed_reason},
                  error=f"{fallback_reason}, used fallback template" if fallback else None,
                  final_model=model, segments=info["segments"], encoding=info["encoding"])
     log.info(json.dumps({"alert": "composed", "model": model, "segments": info["segments"],
                          "encoding": info["encoding"], "chars": info["chars"], "fallback": fallback,
-                         "template_version": tpl.get("version")}))
+                         "suppressed": suppressed, "template_version": tpl.get("version")}))
     return {
         "message": message, "discord_message": discord_message,
         "what_changed": what_out, "note": note_out, "urls": _urls(changes),
         "segments": info["segments"], "encoding": info["encoding"], "units": info["units"],
         "template_version": tpl.get("version"), "model": model, "model_notify": model_notify,
-        "fallback": fallback, "fallback_reason": fallback_reason, "trace_id": trace.trace_id, "attempts": attempts,
+        "fallback": fallback, "fallback_reason": fallback_reason, "suppressed": suppressed,
+        "suppressed_reason": suppressed_reason, "trace_id": trace.trace_id, "attempts": attempts,
     }
 
 
@@ -319,10 +339,12 @@ def handler(event, context):
         tpl = load_template(t["templates"], campaign_id)
         built = build_alert(bedrock_client(), tpl, campaign_id, changes, bool(detail.get("priority")),
                             {"source_event_id": source_event_id, "is_test": is_test or None})
+        status = "suppressed" if built.get("suppressed") else "published"
         fields = {
-            **{k: v for k, v in built.items() if v is not None and k not in ("trace_id", "attempts")},
+            **{k: v for k, v in built.items()
+               if v is not None and k not in ("trace_id", "attempts", "suppressed")},
             "source_event_id": source_event_id,
-            "status": "published",
+            "status": status,
             "backfilled": False,
             "detected_at": detail.get("detected_at"),
             "created_at": _iso(time.time()),
@@ -340,7 +362,10 @@ def handler(event, context):
     except Exception as e:
         log.error(json.dumps({"fanout": "config_unreadable", "error": type(e).__name__}))
         cfg = None
-    fanout_hook({**fields, "campaign_id": campaign_id, "sent_at": sent_at}, cfg)
-    discord_hook(t["alerts"], fields, campaign_id, sent_at, cfg, is_test, bool(detail.get("dry_run")))
+    # notify=false (status=suppressed): audit row only — no SMS fan-out, no Discord, no generic fallback.
+    if fields.get("status") == "published":
+        fanout_hook({**fields, "campaign_id": campaign_id, "sent_at": sent_at}, cfg)
+        discord_hook(t["alerts"], fields, campaign_id, sent_at, cfg, is_test, bool(detail.get("dry_run")))
     return {"stored": True, "campaign_id": campaign_id, "sent_at": sent_at, "segments": built["segments"],
-            "encoding": built["encoding"], "model": built["model"], "test": is_test}
+            "encoding": built["encoding"], "model": built["model"], "test": is_test,
+            "status": fields.get("status")}

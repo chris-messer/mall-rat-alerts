@@ -6,6 +6,9 @@ POST /api/subscribe       store a PENDING_SENDER membership (phone + campaign) w
 POST /api/unsubscribe     mark the phone OPTED_OUT for one campaign.
 POST /api/twilio/inbound  Twilio SMS webhook (signed): YES / STOP / HELP / START router, TwiML replies only.
 POST /api/twilio/status   Twilio status callback (signed): 21610 means the carrier says opted out.
+POST /api/discord/member-event  Legacy unused route: Discord join / leave / sync from the optional local gateway
+                          bot (HMAC in the body). Production Discord counts come from the scheduled
+                          discord_count_sync Lambda pull instead. Kept so Terraform routes stay stable.
 
 Subscribe and unsubscribe accept JSON (fetch from app.js) or a plain HTML form
 post (works without JavaScript). Responses are the same whether or not a number
@@ -26,6 +29,7 @@ import urllib.parse
 import boto3
 
 from common import analytics
+from common import counts
 from common import keywords
 from common import phone as phones
 from common import sms_text
@@ -78,6 +82,8 @@ TWILIO_SID_KEY = os.environ.get("TWILIO_SID_KEY", "twilio_account_sid")
 TWILIO_FROM_NUMBER = os.environ.get("TWILIO_FROM_NUMBER", "")
 TWILIO_WEBHOOK_BASE = os.environ.get("TWILIO_WEBHOOK_BASE", "").rstrip("/")
 PUBLIC_SITE_URL = os.environ.get("PUBLIC_SITE_URL", "")
+DISCORD_GUILD_ID = os.environ.get("DISCORD_GUILD_ID", "")
+DISCORD_MEMBER_SECRET_KEY = os.environ.get("DISCORD_MEMBER_SECRET_KEY", "discord_member_webhook_secret")
 SUPPORT_EMAIL = os.environ.get("SUPPORT_EMAIL", "hello@mallratalerts.com")
 MIN_FILL_SECONDS = 2
 MAX_BODY_BYTES = 4096
@@ -141,6 +147,7 @@ _tables = {}
 _turnstile_secret = {"value": None}
 _twilio_token = {"value": None}
 _twilio_creds = {"value": None}
+_member_secret = {"value": None}
 _TOLL_FREE = re.compile(r"^\+18(00|33|44|55|66|77|88)\d{7}$")
 _E164 = re.compile(r"^\+\d{8,15}$")
 PENDING_STATUSES = ("PENDING_SENDER", "PENDING")
@@ -179,6 +186,17 @@ def twilio_token():
         raw = sm.get_secret_value(SecretId=TWILIO_SECRET_ID)["SecretString"]
         _twilio_token["value"] = json.loads(raw)[TWILIO_TOKEN_KEY]
     return _twilio_token["value"]
+
+
+def member_event_secret():
+    """Shared secret for the Discord member-event push (same Secrets Manager secret as Twilio). Fail closed."""
+    if _member_secret["value"] is None:
+        if not TWILIO_SECRET_ID:
+            raise RuntimeError("secret id not configured")
+        sm = boto3.client("secretsmanager")
+        raw = json.loads(sm.get_secret_value(SecretId=TWILIO_SECRET_ID)["SecretString"])
+        _member_secret["value"] = raw[DISCORD_MEMBER_SECRET_KEY]
+    return _member_secret["value"]
 
 
 def twilio_credentials():
@@ -582,7 +600,7 @@ def unsubscribe(event, headers, payload, is_form, now):
         return respond(429, "rate_limited", is_form)
 
     at = store.now_iso(now)
-    changed = store.mark_opted_out(t["subs"], phone, campaign_id, at, "WEB")
+    changed = store.mark_opted_out(t["subs"], phone, campaign_id, at, "WEB", ops_table=t["ops"])
     store.audit(
         t["audit"], phone, campaign_id, "unsubscribe" if changed else "unsubscribe_noop", at,
         actor="user", method="WEB", ip_hash=ip_hash, ua_hash=keyed_hash(headers.get("user-agent", "")),
@@ -650,7 +668,7 @@ def _sms_subscribe(frm, body, sid, matched, t, cfg, now, at, autoreply_ok):
             "source_site": campaign.get("source_site"),
         }
         if prior in PENDING_STATUSES:
-            if not store.activate(t["subs"], frm, cid, prior, at, sid):
+            if not store.activate(t["subs"], frm, cid, prior, at, sid, ops_table=t["ops"]):
                 continue
             store.refresh_pending(t["subs"], frm, cid, {
                 **snapshot, "sms_tag": tag["tag"], "sms_consent_version": tagmod.CONSENT_VERSION,
@@ -668,7 +686,7 @@ def _sms_subscribe(frm, body, sid, matched, t, cfg, now, at, autoreply_ok):
             }
             if prior == "OPTED_OUT":
                 item["previous_unsubscribed_at"] = existing.get("unsubscribed_at")
-            store.put_subscriber(t["subs"], item)
+            store.put_subscriber(t["subs"], item, ops_table=t["ops"])
             result = "resubscribed" if prior else "new"
         store.audit(t["audit"], frm, cid, "subscribe_sms_tag", at, prior_status=prior, new_status="ACTIVE",
                     waitlist_mode=waitlist, **base)
@@ -724,7 +742,7 @@ def inbound(params, now):
     if kw == "STOP":
         changed = [m for m in mems if m.get("status") != "OPTED_OUT"]
         for m in changed:
-            if store.mark_opted_out(t["subs"], frm, m["campaign_id"], at, "STOP_KEYWORD"):
+            if store.mark_opted_out(t["subs"], frm, m["campaign_id"], at, "STOP_KEYWORD", ops_table=t["ops"]):
                 store.audit(t["audit"], frm, m["campaign_id"], "sms_stop", at, prior_status=m.get("status"),
                             new_status="OPTED_OUT", **base)
         if not changed:
@@ -740,7 +758,7 @@ def inbound(params, now):
             reply = keywords.start_text(PUBLIC_SITE_URL, tag_list)
     elif kw == "YES":
         if target and target.get("status") in PENDING_STATUSES and \
-                store.activate(t["subs"], frm, cid, target["status"], at, sid):
+                store.activate(t["subs"], frm, cid, target["status"], at, sid, ops_table=t["ops"]):
             store.audit(t["audit"], frm, cid, "subscribe_confirmed", at, prior_status=target["status"],
                         new_status="ACTIVE", campaign_name=target.get("campaign_name"), **base)
             reply = keywords.welcome(target.get("campaign_name") or "fan", target.get("source_site"),
@@ -797,8 +815,99 @@ def status_callback(params, now):
     _record_delivery(params, to, now)
     if code == "21610" and _E164.match(to):
         t = tables()
-        store.carrier_opt_out(t["subs"], t["audit"], to, store.now_iso(now), "twilio", params.get("MessageSid"))
+        store.carrier_opt_out(t["subs"], t["audit"], to, store.now_iso(now), "twilio", params.get("MessageSid"),
+                              ops_table=t["ops"])
     return {"statusCode": 204, "headers": {}, "body": ""}
+
+
+MEMBER_EVENT_WINDOW_SECONDS = 300
+MEMBER_JOIN_DEDUPE_SECONDS = 7 * 86400   # a replayed join carries the same joined_at
+MEMBER_LEAVE_DEDUPE_SECONDS = 120        # leave events have no unique id; collapse reconnect replays
+_SNOWFLAKE = re.compile(r"^\d{5,25}$")
+_ISO_TS = re.compile(r"^[0-9T:.+\-Zz]{10,40}$")
+
+
+def member_event_sig(secret, event, guild_id, user_id, joined_at, member_count, ts):
+    msg = "\n".join(str(x if x is not None else "") for x in (event, guild_id, user_id, joined_at, member_count, ts))
+    return hmac.new(secret.encode(), msg.encode(), hashlib.sha256).hexdigest()
+
+
+def discord_member_event(event, headers, now):
+    """POST /api/discord/member-event from the gateway bot: join / leave (+/-1) or sync (absolute count).
+    Body is JSON with an HMAC `sig` (headers other than Content-Type never reach us through CloudFront).
+    Returns 204 for accepted, ignored and duplicate events; 401 for a bad signature; 503 so the bot retries."""
+    def status(code):
+        return {"statusCode": code, "headers": {"Cache-Control": "no-store"}, "body": ""}
+
+    if _edge_checks(headers, check_country=False):
+        return status(403)
+    if not DISCORD_GUILD_ID:
+        return status(404)
+    body = event.get("body") or ""
+    if event.get("isBase64Encoded"):
+        try:
+            body = base64.b64decode(body).decode("utf-8")
+        except Exception:
+            return status(400)
+    try:
+        data = json.loads(body) if len(body) <= MAX_BODY_BYTES else None
+    except ValueError:
+        data = None
+    if not isinstance(data, dict):
+        return status(400)
+    kind = data.get("event")
+    guild_id, user_id = str(data.get("guild_id") or ""), str(data.get("user_id") or "")
+    joined_at, member_count = str(data.get("joined_at") or ""), data.get("member_count")
+    ts, sig = data.get("ts"), data.get("sig")
+    try:
+        secret = member_event_secret()
+    except Exception as e:
+        log.error("member event secret unavailable: %s", type(e).__name__)
+        return status(503)
+    try:
+        ts_int = int(ts)
+    except (TypeError, ValueError):
+        return status(400)
+    expected = member_event_sig(secret, kind, guild_id, user_id, joined_at,
+                                member_count if member_count is not None else "", ts_int)
+    if not isinstance(sig, str) or not hmac.compare_digest(expected, sig):
+        _log("member_event", "bad_signature")
+        return status(401)
+    if abs(now - ts_int) > MEMBER_EVENT_WINDOW_SECONDS:
+        _log("member_event", "stale")
+        return status(400)
+    if guild_id != DISCORD_GUILD_ID:
+        _log("member_event", "wrong_guild")
+        return status(204)
+    t = tables()
+    cid = DEFAULT_CAMPAIGN_ID
+    try:
+        if kind == "sync":
+            if not isinstance(member_count, int) or isinstance(member_count, bool) or member_count < 0:
+                return status(400)
+            result = counts.discord_sync(t["ops"], cid, member_count, now)
+        elif kind in ("join", "leave"):
+            if not _SNOWFLAKE.match(user_id) or (kind == "join" and not _ISO_TS.match(joined_at)):
+                return status(400)
+            if kind == "join":
+                pk, window, delta = f"dedupe#discord#join#{guild_id}#{user_id}#{joined_at}", MEMBER_JOIN_DEDUPE_SECONDS, 1
+            else:
+                pk, window, delta = f"dedupe#discord#leave#{guild_id}#{user_id}", MEMBER_LEAVE_DEDUPE_SECONDS, -1
+            if not store.claim(t["ops"], pk, window, now):
+                _log("member_event", "duplicate", kind=kind)
+                return status(204)
+            try:
+                result = counts.discord_adjust(t["ops"], cid, delta, now)
+            except Exception:
+                store.release_claim(t["ops"], pk)
+                raise
+        else:
+            return status(400)
+    except Exception as e:
+        log.error("member event failed: %s", type(e).__name__)
+        return status(503)
+    _log("member_event", result, kind=kind, campaign_id=cid)
+    return status(204)
 
 
 FEED_FIELDS = ("sent_at", "message", "what_changed", "note", "urls", "backfilled", "status")
@@ -890,6 +999,9 @@ def handler(event, context):
             _log(path, blocked[1])
             return {"statusCode": 403, "headers": {}, "body": ""}
         return twilio_route(event, headers, path, twilio_fn)
+
+    if (method, path) == ("POST", "/api/discord/member-event"):
+        return discord_member_event(event, headers, time.time())
 
     if (method, path) == ("GET", "/api/alerts"):
         if _edge_checks(headers, check_country=False):

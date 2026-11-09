@@ -17,6 +17,8 @@ from common import alert_text, llm_trace, sms_text  # noqa: E402
 
 CAMPAIGN = "fob-twilight-town-mall-2026"
 CHANGES = [{"url": "https://www.falloutboy.com/aces-hifi-records", "status": {"before": 404, "after": 200}}]
+JUNK_FLIP = [{"url": "https://www.falloutboy.com/phase2", "status": {"before": 403, "after": 404},
+              "title": {"before": "Twilight Town Mall | Not authorized", "after": "Fall Out Boy | Page not found"}}]
 SELF_REF = re.compile(r"\b(AI|A\.I\.|artificial intelligence|language model|LLM|bot|GPT|Claude|Bedrock)\b", re.I)
 
 
@@ -144,15 +146,46 @@ class BuildAlertTest(unittest.TestCase):
         self.assertEqual(out["message"], out["what_changed"] + "\n\n" + out["note"])
         self.assertEqual(len(b.calls), 3)
 
-    def test_notify_false_still_produces_fallback_alert(self):
+    def test_notify_false_suppresses_without_fallback_text(self):
         b = FakeBedrock(reply({**GOOD, "notify": False}))
-        with self.assertLogs(ac.log, "WARNING") as logs:
+        with self.assertLogs(ac.log, "INFO") as logs:
             out = self.build(b)
-        self.assertTrue(out["fallback"])
-        self.assertEqual((out["model"], out["model_notify"]), ("fallback:template", False))
-        self.assertIn("notify=false", out["fallback_reason"])
-        self.assertIn("falloutboy.com/aces-hifi-records", out["what_changed"])
-        self.assertTrue(any("notify=false" in m for m in logs.output))
+        self.assertTrue(out["suppressed"])
+        self.assertFalse(out["fallback"])
+        self.assertIsNone(out["fallback_reason"])
+        self.assertEqual((out["model"], out["model_notify"]), ("model-a", False))
+        self.assertEqual(out["what_changed"], GOOD["what_changed"])
+        self.assertNotIn("Something changed on", out["what_changed"])
+        self.assertNotIn("Something changed on", out["message"])
+        self.assertTrue(any("suppressed" in m and "notify=false" in m for m in logs.output))
+
+    def test_prefilter_suppresses_without_calling_the_model(self):
+        b = FakeBedrock()
+        with self.assertLogs(ac.log, "INFO") as logs:
+            out = self.build(b, changes=JUNK_FLIP)
+        self.assertEqual(b.calls, [])
+        self.assertTrue(out["suppressed"])
+        self.assertEqual(out["suppressed_reason"], "prefilter:status_flip")
+        self.assertEqual(out["model"], "prefilter")
+        self.assertFalse(out["fallback"])
+        self.assertIsNone(out["model_notify"])
+        self.assertTrue(out["what_changed"])  # audit text is kept
+        self.assertTrue(any("prefilter:status_flip" in m for m in logs.output))
+
+    def test_prefilter_does_not_stop_important_changes_or_priority_alerts(self):
+        b = FakeBedrock(reply(GOOD))
+        out = self.build(b, changes=CHANGES)
+        self.assertEqual(len(b.calls), 1)
+        self.assertFalse(out["suppressed"])
+        self.assertIsNone(out["suppressed_reason"])
+        # The Visit-tab priority path is fixed text and is never pre-filtered.
+        out = self.build(FakeBedrock(), changes=JUNK_FLIP, priority=True)
+        self.assertFalse(out["suppressed"])
+        self.assertEqual(out["model"], "fixed:visit-tab")
+
+    def test_model_notify_false_records_a_reason(self):
+        out = self.build(FakeBedrock(reply({**GOOD, "notify": False})))
+        self.assertEqual(out["suppressed_reason"], "model:notify_false")
 
     def test_compose_crash_uses_fallback(self):
         orig = alert_text.compose
@@ -254,15 +287,65 @@ class HandlerTest(unittest.TestCase):
         self.assertEqual(a["template_version"], 0)  # default template when the table has none
         self.assertNotIn("is_test", a)
 
-    def test_notify_false_and_invalid_output_are_still_stored_published(self):
+    def test_notify_false_stored_suppressed_invalid_output_still_published(self):
         ac._bedrock["c"] = FakeBedrock(reply({**GOOD, "notify": False}))
         ac.handler(self.event("nf"), None)
         ac._bedrock["c"] = FakeBedrock(reply("x"), reply("y"), reply("z"))
         ac.handler(self.event("bad", detected_at="2026-11-06T17:22:00Z") | {"time": "2026-11-06T17:22:00Z"}, None)
         rows = sorted(self.stored(), key=lambda a: a["sent_at"])
-        self.assertEqual([(a["source_event_id"], a["status"], a["fallback"]) for a in rows],
-                         [("nf", "published", True), ("bad", "published", True)])
-        self.assertTrue(all(a["fallback_reason"] for a in rows))
+        self.assertEqual([(a["source_event_id"], a["status"], a.get("fallback"), a.get("model_notify")) for a in rows],
+                         [("nf", "suppressed", False, False), ("bad", "published", True, None)])
+        self.assertNotIn("Something changed on", rows[0]["what_changed"])
+        self.assertIn("Something changed on", rows[1]["what_changed"])
+        self.assertTrue(rows[1]["fallback_reason"])
+        self.assertNotIn("suppressed", rows[0])  # flag is not persisted; status carries it
+
+    def test_notify_false_skips_fanout_and_discord_notify_true_does_not(self):
+        fanouts, posts = [], []
+        orig_fanout, orig_discord = ac.fanout_hook, ac.discord_hook
+        ac.fanout_hook = lambda *a, **k: fanouts.append(a)
+        ac.discord_hook = lambda *a, **k: posts.append(a)
+        try:
+            ac._bedrock["c"] = FakeBedrock(reply({**GOOD, "notify": False}))
+            res_false = ac.handler(self.event("nf"), None)
+            self.assertEqual((fanouts, posts), ([], []))
+            self.assertEqual(res_false["status"], "suppressed")
+            (suppressed,) = [a for a in self.stored() if a["source_event_id"] == "nf"]
+            self.assertEqual(suppressed["status"], "suppressed")
+
+            ac._bedrock["c"] = FakeBedrock(reply(GOOD))
+            res_true = ac.handler(self.event("ok", detected_at="2026-11-06T17:22:00Z")
+                                  | {"time": "2026-11-06T17:22:00Z"}, None)
+            self.assertEqual(len(fanouts), 1)
+            self.assertEqual(len(posts), 1)
+            self.assertEqual(res_true["status"], "published")
+            (published,) = [a for a in self.stored() if a["source_event_id"] == "ok"]
+            self.assertEqual(published["status"], "published")
+        finally:
+            ac.fanout_hook, ac.discord_hook = orig_fanout, orig_discord
+
+    def test_prefiltered_event_is_stored_suppressed_with_reason_and_never_sent(self):
+        fanouts, posts = [], []
+        orig_fanout, orig_discord = ac.fanout_hook, ac.discord_hook
+        ac.fanout_hook = lambda *a, **k: fanouts.append(a)
+        ac.discord_hook = lambda *a, **k: posts.append(a)
+        try:
+            res = ac.handler(self.event("junk", changes=JUNK_FLIP), None)
+        finally:
+            ac.fanout_hook, ac.discord_hook = orig_fanout, orig_discord
+        self.assertEqual((res["status"], res["model"]), ("suppressed", "prefilter"))
+        self.assertEqual((fanouts, posts), ([], []))
+        self.assertEqual(self.bedrock.calls, [])
+        (a,) = self.stored()
+        self.assertEqual((a["status"], a["suppressed_reason"], a["source_event_id"]),
+                         ("suppressed", "prefilter:status_flip", "junk"))
+        self.assertNotIn("suppressed", a)
+
+    def test_published_alert_has_no_suppressed_reason(self):
+        ac.handler(self.event("ok"), None)
+        (a,) = self.stored()
+        self.assertEqual(a["status"], "published")
+        self.assertNotIn("suppressed_reason", a)
 
     def test_live_template_is_fetched_every_run(self):
         self.templates.put_item(Item={"pk": f"template#public#{CAMPAIGN}", "sk": "current", "version": 7,
@@ -346,6 +429,14 @@ class PromptCopyTest(unittest.TestCase):
         self.assertIsNone(re.search("[\U0001F000-\U0001FAFF\u2600-\u27BF]", text))
         self.assertIn("what_changed", text)
         self.assertIn("note", text)
+
+    def test_default_prompt_has_conservative_significance_guidance(self):
+        text = ac.default_prompt()
+        self.assertIn("when unsure, notify=false", text)
+        self.assertNotIn("When unsure, true", text)
+        for must in ("notify=true for", "notify=false for", "tour", "presale", "merch", "puzzle",
+                     "sitemap.xml", "403 to 404", "Link-only"):
+            self.assertIn(must, text)
 
 
 if __name__ == "__main__":
