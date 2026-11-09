@@ -163,12 +163,35 @@ class PostTest(Base):
         self.assertEqual(len(calls), 1)
         self.assertEqual(self.sleeps, [])
 
-    def test_long_text_is_truncated_under_2000(self):
+    def test_long_text_is_truncated_at_or_under_4096(self):
         seen = []
+        words = " ".join(f"word{i}" for i in range(1200))  # well over 4000 chars, with word boundaries
         with mock.patch("urllib.request.urlopen", lambda r, timeout=None: seen.append(json.loads(r.data)) or Resp(204)):
-            discord.post_public_alert(CAMPAIGN, "a" * 5000, SENT_AT)
-        self.assertLessEqual(len(seen[0]["embeds"][0]["description"]), 1900)
-        self.assertTrue(seen[0]["embeds"][0]["description"].endswith("..."))
+            discord.post_public_alert(CAMPAIGN, words, SENT_AT)
+        desc = seen[0]["embeds"][0]["description"]
+        self.assertLessEqual(len(desc), 4096)
+        self.assertLessEqual(len(desc), discord.MAX_DESCRIPTION)
+        self.assertTrue(desc.endswith("..."))
+        self.assertNotIn("  ", desc)  # clipped on a word, not mid-run of spaces
+
+    def test_embed_total_chars_under_6000(self):
+        seen = []
+        body = " ".join(["site-change-summary"] * 500)
+        with mock.patch("urllib.request.urlopen", lambda r, timeout=None: seen.append(json.loads(r.data)) or Resp(204)):
+            discord.post_public_alert(CAMPAIGN, body, SENT_AT)
+        emb = seen[0]["embeds"][0]
+        total = discord._embed_chars(emb)
+        self.assertLessEqual(total, 6000)
+        self.assertLessEqual(len(emb["title"]), 256)
+        self.assertLessEqual(len(emb["footer"]["text"]), 2048)
+
+    def test_clip_words_breaks_on_word_boundary(self):
+        text = "alpha beta gamma delta epsilon"
+        out = discord.clip_words(text, 20)
+        self.assertLessEqual(len(out), 20)
+        self.assertTrue(out.endswith("..."))
+        self.assertFalse(out[:-3].endswith("epsil"))  # not a mid-word cut of epsilon
+        self.assertIn(out[:-3].rstrip(), ("alpha beta gamma", "alpha beta", "alpha"))
 
     def test_marker_prevents_double_post(self):
         calls = []
@@ -225,6 +248,24 @@ class ComposerGatingTest(Base):
         self.assertEqual(call[0], CAMPAIGN)
         self.assertEqual(call[2], res["sent_at"])
         self.assertIn("Aces Hifi Records", call[1])
+        stored = self.alerts.items[(CAMPAIGN, res["sent_at"])]
+        self.assertIn("discord_message", stored)
+        # Discord body is the full stored text, optionally plus the first site URL.
+        self.assertTrue(call[1] == stored["discord_message"] or call[1].startswith(stored["discord_message"] + "\n\n"))
+
+    def test_discord_gets_full_body_while_sms_message_stays_capped(self):
+        long_what = ("Aces Hifi Records opened a brand new listening booth with rare vinyl and "
+                     "signed memorabilia near store 04 on falloutboy.com/aces-hifi-records. ") * 4
+        long_note = "Thnks fr th mmrs. " + ("extra lyric nod word " * 20)
+        ac._bedrock["c"] = FakeBedrock(reply({"notify": True, "what_changed": long_what, "note": long_note}))
+        res = ac.handler(self.event(), None)
+        stored = self.alerts.items[(CAMPAIGN, res["sent_at"])]
+        from common import sms_text
+        self.assertLessEqual(sms_text.units(stored["message"]), 306)
+        self.assertGreater(len(stored["discord_message"]), len(stored["message"]))
+        (call,) = self.posts
+        self.assertTrue(call[1].startswith(stored["discord_message"]) or call[1] == stored["discord_message"])
+        self.assertIn("https://www.falloutboy.com/aces-hifi-records", call[1])
 
     def test_not_posted_for_test_events(self):
         ac.handler(self.event("a", test=True), None)
@@ -250,6 +291,21 @@ class ComposerGatingTest(Base):
     def test_not_posted_when_status_not_published(self):
         self.assertIsNone(ac.discord_hook(self.alerts, {"status": "draft", "message": "x"}, CAMPAIGN, SENT_AT, None, False))
         self.assertEqual(self.posts, [])
+
+    def test_discord_text_prefers_full_body_and_appends_site_url(self):
+        fields = {"discord_message": "Full site-change summary.\n\nThnks fr th mmrs.",
+                  "message": "Short SMS.",
+                  "urls": ["https://www.falloutboy.com/aces-hifi-records"]}
+        text = ac.discord_text_for(fields)
+        self.assertTrue(text.startswith(fields["discord_message"]))
+        self.assertIn("https://www.falloutboy.com/aces-hifi-records", text)
+        self.assertNotIn("Short SMS.", text)
+        # No Discord invite is injected.
+        self.assertNotIn("discord.gg", text)
+        # URL already in body is not duplicated.
+        already = {"discord_message": "See https://www.falloutboy.com/x now.",
+                   "urls": ["https://www.falloutboy.com/x"]}
+        self.assertEqual(ac.discord_text_for(already), already["discord_message"])
 
     def test_discord_failure_never_breaks_composer(self):
         def boom(*a, **k):

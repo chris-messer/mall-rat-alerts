@@ -18,7 +18,12 @@ import urllib.request
 
 log = logging.getLogger()
 
-MAX_CONTENT = 1900          # Discord's message limit is 2000 characters
+# Discord limits: content 2000; embed title 256; description 4096; footer 2048;
+# total characters across all embeds in one message 6000. We stay under those.
+MAX_DESCRIPTION = 4000      # leave headroom under Discord's 4096 description cap
+MAX_TITLE = 256
+MAX_FOOTER = 2048
+MAX_EMBEDS_TOTAL = 6000
 TIMEOUT_SECONDS = 5
 MAX_RETRY_AFTER_SECONDS = 10  # one 429 retry at most, and only if Discord asks for a short wait
 USER_AGENT = "MallRatAlerts (fan project alert relay, 1.0)"  # Discord's edge rejects the default urllib agent
@@ -59,15 +64,56 @@ def _webhook_for(secret_key):
     return url
 
 
-def clip(text, limit=MAX_CONTENT):
+def clip(text, limit=MAX_DESCRIPTION):
+    """Hard truncate with an ellipsis. Prefer clip_words for long bodies."""
     text = str(text or "").strip()
     return text if len(text) <= limit else text[:limit - 3].rstrip() + "..."
 
 
+def clip_words(text, limit=MAX_DESCRIPTION):
+    """Truncate at a word boundary so len(result) <= limit, ending with '...' when cut."""
+    text = str(text or "").strip()
+    if len(text) <= limit:
+        return text
+    if limit <= 3:
+        return ""
+    budget = limit - 3
+    cut = text[:budget]
+    sp = cut.rfind(" ")
+    # Only break on a space if it keeps a meaningful prefix (at least half the budget).
+    if sp >= max(1, budget // 2):
+        cut = cut[:sp]
+    return cut.rstrip(" ,;:-") + "..."
+
+
+def _embed_chars(embed):
+    n = len(embed.get("title") or "") + len(embed.get("description") or "")
+    n += len((embed.get("footer") or {}).get("text") or "")
+    n += len((embed.get("author") or {}).get("name") or "")
+    for field in embed.get("fields") or []:
+        n += len(field.get("name") or "") + len(field.get("value") or "")
+    return n
+
+
 def payload_for(campaign_id, text, alert_id):
+    """One embed: long body in description (word-boundary clip), title + footer within limits."""
+    title = clip(TITLES.get(campaign_id, DEFAULT_TITLE), MAX_TITLE)
+    footer = clip(f"Alert {alert_id}", min(100, MAX_FOOTER))
+    # Leave room so title + description + footer stay under the per-message embed total.
+    desc_limit = min(MAX_DESCRIPTION, MAX_EMBEDS_TOTAL - len(title) - len(footer))
+    description = clip_words(text, max(desc_limit, 0))
+    embed = {"title": title, "description": description, "footer": {"text": footer}}
+    # Last-resort clip if somehow still over (should not happen with the budget above).
+    while _embed_chars(embed) > MAX_EMBEDS_TOTAL and embed["description"]:
+        over = _embed_chars(embed) - MAX_EMBEDS_TOTAL
+        new_limit = max(len(embed["description"]) - max(over, 1), 0)
+        new_desc = clip_words(embed["description"], new_limit)
+        if new_desc == embed["description"]:
+            embed["description"] = clip(embed["description"], new_limit)
+            break
+        embed["description"] = new_desc
     return {
-        "embeds": [{"title": TITLES.get(campaign_id, DEFAULT_TITLE), "description": clip(text, 1900),
-                    "footer": {"text": clip(f"Alert {alert_id}", 100)}}],
+        "embeds": [embed],
         "allowed_mentions": {"parse": []},  # a mention in the text must never ping anyone
     }
 

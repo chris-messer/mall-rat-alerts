@@ -178,17 +178,24 @@ def build_alert(bedrock, template, campaign_id, changes, priority=False, trace_p
             log.warning(json.dumps({"alert": "fallback", "reason": fallback_reason, "campaign_id": campaign_id}))
             what, note = fallback_parts(changes, tpl)
             model, fallback = "fallback:template", True
+    # Full body for Discord (and storage): same sanitize as SMS, but no SMS length budget.
+    # SMS `message` stays capped by assemble(); Discord posts `discord_message` instead.
+    what_full = sms_text.sanitize(alert_text.one_line(what), "public")
+    note_full = sms_text.sanitize(alert_text.one_line(note), "public")
+    discord_message = what_full + (alert_text.SEP + note_full if note_full else "")
     message, info = alert_text.assemble(what, note, "public", max_chars, target)
     what_out, _, note_out = message.partition(alert_text.SEP)
     trace.finish(input_state={"changes": len(changes or []), "urls": _urls(changes), "priority": bool(priority)},
-                 output_state={"message": message, **info, "model": model, "fallback": fallback},
+                 output_state={"message": message, "discord_message": discord_message, **info,
+                               "model": model, "fallback": fallback},
                  error=f"{fallback_reason}, used fallback template" if fallback else None,
                  final_model=model, segments=info["segments"], encoding=info["encoding"])
     log.info(json.dumps({"alert": "composed", "model": model, "segments": info["segments"],
                          "encoding": info["encoding"], "chars": info["chars"], "fallback": fallback,
                          "template_version": tpl.get("version")}))
     return {
-        "message": message, "what_changed": what_out, "note": note_out, "urls": _urls(changes),
+        "message": message, "discord_message": discord_message,
+        "what_changed": what_out, "note": note_out, "urls": _urls(changes),
         "segments": info["segments"], "encoding": info["encoding"], "units": info["units"],
         "template_version": tpl.get("version"), "model": model, "model_notify": model_notify,
         "fallback": fallback, "fallback_reason": fallback_reason, "trace_id": trace.trace_id, "attempts": attempts,
@@ -271,13 +278,24 @@ def fanout_hook(alert, cfg=None):
     return res.get("MessageId") or "enqueued"
 
 
+def discord_text_for(fields):
+    """Body posted to Discord: full (non-SMS-capped) summary when stored, else the SMS message.
+    Appends the first site URL when present and not already in the text. Never adds a Discord invite."""
+    text = (fields.get("discord_message") or fields.get("message") or "").strip()
+    urls = fields.get("urls") or []
+    first = urls[0] if urls and isinstance(urls[0], str) and urls[0].startswith("https://") else None
+    if first and first not in text:
+        text = f"{text}\n\n{first}" if text else first
+    return text
+
+
 def discord_hook(alerts_table, fields, campaign_id, sent_at, cfg, is_test, event_dry_run=False):
     """Mirror a real, published alert to the campaign's Discord channel. Runs after the alert is stored and the
     fan-out job is enqueued. Skips test events and dry runs (event flag or ops fanout_mode dry_run). Never raises."""
     try:
         if is_test or event_dry_run or fanout.mode_of(cfg) == "dry_run" or fields.get("status") != "published":
             return None
-        return discord.post_public_alert(campaign_id, fields.get("message"), sent_at, alerts_table)
+        return discord.post_public_alert(campaign_id, discord_text_for(fields), sent_at, alerts_table)
     except Exception as e:
         log.error(json.dumps({"discord": "hook_failed", "error": type(e).__name__}))
         return None

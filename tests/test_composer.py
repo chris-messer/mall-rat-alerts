@@ -99,6 +99,16 @@ class BuildAlertTest(unittest.TestCase):
         self.assertGreaterEqual(out["segments"], 1)
         self.assertLessEqual(out["segments"], 2)
 
+    def test_discord_message_keeps_full_body_sms_message_stays_capped(self):
+        long_what = "A very long description of what happened on the site. " * 8 + "falloutboy.com/x"
+        note = "Thnks fr th mmrs."
+        out = self.build(FakeBedrock(reply({"notify": True, "what_changed": long_what, "note": note})))
+        self.assertLessEqual(sms_text.units(out["message"]), 306)
+        self.assertGreater(len(out["discord_message"]), len(out["message"]))
+        self.assertTrue(out["discord_message"].endswith(note))
+        self.assertIn("falloutboy.com/x", out["discord_message"])
+        self.assertTrue(sms_text.is_gsm7(out["discord_message"]))
+
     def test_note_is_trimmed_before_description_to_hit_one_segment(self):
         what = "Aces Hifi Records is now open. Look for store 04 at falloutboy.com/aces-hifi-records"
         note = "This ain't a scene, it's a godd... word word word word word word word word word word word word word"
