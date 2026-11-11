@@ -71,6 +71,13 @@ class EventPatternTest(unittest.TestCase):
     def test_event_without_test_key_matches(self):
         self.check(monitor_event(include_test_key=False), True)
 
+    def test_pattern_does_not_depend_on_host(self):
+        for url in ("https://twilighttownmall.falloutboy.com/lost-and-found", "https://www.falloutboy.com/tour"):
+            ev = monitor_event()
+            ev["detail"]["changes"] = [{"url": url}]
+            self.check(ev, True)
+        self.assertNotIn("falloutboy", json.dumps(rule_pattern()))
+
     def test_monitor_test_events_do_not_match(self):
         self.check(monitor_event(test=True), False)
         ev = monitor_event(test=False)

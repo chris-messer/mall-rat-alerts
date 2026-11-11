@@ -1,7 +1,7 @@
 # Mall Rat Alerts (Phase 1: waitlist mode)
 
 Free, unofficial, multi-campaign fan text alerts. Current campaign: **Twilight Town Mall**
-(`fob-twilight-town-mall-2026`), alerts when falloutboy.com changes. Design doc:
+(`fob-twilight-town-mall-2026`), alerts when falloutboy.com or twilighttownmall.falloutboy.com changes. Design doc:
 `../fob-site-monitor/docs/signup-site-design.md` (Phase 1, adapted as noted below).
 
 Live: https://mallratalerts.com (and https://www.mallratalerts.com). The CloudFront default domain
@@ -83,7 +83,11 @@ After a YES: `confirmed_at`, `confirm_message_sid`. After opt-out: `unsubscribed
 **alerts** (`mall-rat-alerts-alerts`): PK `campaign_id`, SK `sent_at` (ISO UTC, ms). Public alert history:
 `message`, `what_changed`, `note`, `urls`, `segments`, `encoding`, `status` (`published`), `source_event_id`,
 `template_version`, `model`, `backfilled`, `is_test`, `trace_id`. `src#<event id>` / `marker` rows make the
-composer idempotent. TTL `expires_at` on markers only.
+composer idempotent. `det#<campaign_id>#<detected_at>` / `marker` rows are the hard same-detection guard: a
+second event with the same `detected_at` is stored as `status=suppressed`, `suppressed_reason=
+duplicate:same_detection`, `model=guard` (no model call, no SMS, no Discord). TTL `expires_at` on markers only.
+The recent-alerts context is read with `ConsistentRead=True`. Setting `status=hidden` on an alert row removes it
+from the public feed (the feed only returns `published`/`sent`).
 
 **ops** (`mall-rat-alerts-ops`): PK `pk`, SK `sk`, TTL `expires_at`.
 - `config#global` / `current`: `signups_enabled`, `waitlist_mode`, `broadcast_enabled`, caps, and the `fanout_*` keys
@@ -269,7 +273,7 @@ with strongly consistent reads):
 | alert exists, `status = published`, not `backfilled`, not older than `fanout_max_alert_age_minutes` (120) | alerts |
 | `live` only: alert is not `is_test` (test alerts can only go to the allowlist) | alerts |
 | ACTIVE count (after allowlist filter) <= `fanout_max_recipients_per_alert` (200), else the whole run is refused | active-index |
-| under `max_public_alerts_per_day` (6) for the campaign, counted per UTC day | ops `rl#fanout#...` |
+| under `max_public_alerts_per_day` (15) for the campaign, counted per UTC day | ops `rl#fanout#...` |
 | subscriber still `ACTIVE` at send time (OPTED_OUT / PENDING are skipped) | subscribers, consistent read |
 | no send row yet for (alert, phone) | fanout-sends, conditional put before the Twilio call |
 

@@ -32,7 +32,7 @@ DEFAULTS = {
     "fanout_delay_seconds": 10,
     "fanout_rate_per_second": 2,
     "fanout_max_alert_age_minutes": 120,
-    "max_public_alerts_per_day": 6,
+    "max_public_alerts_per_day": 15,
 }
 
 SHARED_SEGMENTS_PER_SECOND = 3  # toll-free limit, shared with the private monitor on the same number

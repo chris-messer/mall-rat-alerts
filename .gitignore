@@ -37,3 +37,5 @@ venv/
 # OS / tooling
 .DS_Store
 node_modules/
+tfplan*
+*.binary

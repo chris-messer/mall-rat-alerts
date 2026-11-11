@@ -1,6 +1,7 @@
 """Alert composition shared by the private monitor and the public composer.
 
-The model is asked for JSON {"notify", "what_changed", "note"}. Code (not the prompt) enforces
+The model is asked for JSON {"notify", "what_changed", "note"} (the public prompt
+asks for "signoff" instead of "note"; an optional "signoff" is parsed and capped). Code (not the prompt) enforces
 the final shape:
 
     <what_changed>
@@ -28,6 +29,7 @@ log = logging.getLogger()
 
 SEP = "\n\n"
 MIN_NOTE = 12
+SIGNOFF_MAX = 40  # units; the optional model "signoff" is capped to this
 # Messages never talk about how they were written.
 _SELF_REFERENCE = re.compile(
     r"\b(AI|A\.I\.|artificial intelligence|language model|LLM|chat ?bot|GPT|Claude|Bedrock|"
@@ -83,7 +85,17 @@ def parse_model_json(text, mode):
         raise InvalidOutput("empty what_changed")
     if _SELF_REFERENCE.search(what) or _SELF_REFERENCE.search(note):
         raise InvalidOutput("mentions how the message was written")
-    return {"notify": notify, "what_changed": what, "note": note}
+    return {"notify": notify, "what_changed": what, "note": note, "signoff": clean_signoff(obj.get("signoff"), mode)}
+
+
+def clean_signoff(value, mode):
+    """Optional model "signoff": sanitized, one line, capped at SIGNOFF_MAX. "" when absent or unusable."""
+    if not isinstance(value, str):
+        return ""
+    out = sms_text.sanitize(one_line(value), mode)
+    if not out or _SELF_REFERENCE.search(out):
+        return ""
+    return trim_to(out, SIGNOFF_MAX, measure_for(mode))
 
 
 def trim_to(text, limit, measure):
@@ -144,7 +156,7 @@ def _status_of(err):
 def compose(bedrock, trace, template, user_text, model_ids, mode, extra_props=None):
     """Try each model in order. Every attempt is logged to the trace as its own generation.
 
-    Returns {"model", "notify", "what_changed", "note", "attempts"} or None if every model failed.
+    Returns {"model", "notify", "what_changed", "note", "signoff", "attempts"} or None if every model failed.
     """
     system = template["system_prompt"]
     temperature = float(template.get("temperature", 0.2))

@@ -410,6 +410,8 @@ def refuse(t, job, mode, reason, **extra):
                       {"fanout_status": "refused", "fanout_refused_reason": reason, "mode": mode})
     except Exception:
         log.warning("could not mark alert refused")
+    props = {k: v for k, v in extra.items() if k in ("recipients", "cap") and v is not None}
+    _track_sms_skipped(job["campaign_id"], job["sent_at"], reason, fanout_mode=mode, **props)
     return {"refused": reason, "mode": mode}
 
 
@@ -423,6 +425,8 @@ def park(t, job, reason):
     _log("parked", reason=reason, campaign_id=job["campaign_id"], seq=job["seq"])
     _audit(t, job["campaign_id"], "fanout_parked", alert_sent_at=job["sent_at"], reason=reason, seq=job["seq"],
            counts=job.get("counts"))
+    _track_sms_skipped(job["campaign_id"], job["sent_at"], f"parked:{reason}",
+                       fanout_mode=job.get("mode"), seq=job.get("seq"))
     return {"parked": reason}
 
 
@@ -437,6 +441,16 @@ def _track_sms_blast(alert_id, campaign_id, mode, **props):
             "campaign_id": campaign_id, "alert_id": alert_id, "fanout_mode": mode, **props})
     except Exception as e:
         log.warning("fanout posthog track failed (%s)", type(e).__name__)
+
+
+def _track_sms_skipped(campaign_id, sent_at, reason, **props):
+    """PostHog when SMS is deliberately not sent. Mirrors alert_discord_skipped. Fail-open; never phones."""
+    try:
+        analytics.capture("alert_sms_skipped", analytics.alert_distinct_id(campaign_id, sent_at), {
+            "campaign_id": campaign_id, "alert_id": sent_at, "channel": "sms",
+            "skipped": True, "skipped_reason": reason, **{k: v for k, v in props.items() if v is not None}})
+    except Exception as e:
+        log.warning("fanout sms skip posthog track failed (%s)", type(e).__name__)
 
 
 def handler(event, context):
@@ -456,6 +470,7 @@ def process(job, context):
         if job["seq"] == 0:
             _log("skipped", mode=mode, reason=reason, campaign_id=job["campaign_id"])
             _audit(t, job["campaign_id"], "fanout_skipped", alert_sent_at=job["sent_at"], mode=mode, reason=reason)
+            _track_sms_skipped(job["campaign_id"], job["sent_at"], reason or mode, fanout_mode=mode)
             return {"skipped": reason, "mode": mode}
         return park(t, job, reason)
     if fanout.paused(cfg):

@@ -116,7 +116,7 @@ resource "aws_dynamodb_table_item" "config_global" {
     signups_enabled           = { BOOL = true }
     waitlist_mode             = { BOOL = var.waitlist_mode }
     broadcast_enabled         = { BOOL = var.broadcast_enabled }
-    max_public_alerts_per_day = { N = "6" }
+    max_public_alerts_per_day = { N = "15" }
     max_subscribers           = { N = "500" }
     web_confirm_enabled       = { BOOL = true }
     web_confirm_daily_cap     = { N = "50" }

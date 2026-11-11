@@ -1,4 +1,4 @@
-"""PostHog capture for Discord posts and SMS fan-out blasts. Never phones, webhooks, or secrets."""
+"""PostHog capture for Discord posts, SMS blasts, and SMS skips. Never phones, webhooks, or secrets."""
 
 import json
 import os
@@ -19,7 +19,7 @@ import fanout_worker as fw  # noqa: E402
 from common import analytics, discord, store  # noqa: E402
 from test_composer import CAMPAIGN, CHANGES, GOOD, FakeBedrock, reply  # noqa: E402
 from test_discord import Base as DiscordBase, Resp, URL, KEY, SENT_AT  # noqa: E402
-from test_fanout import FanoutTestCase, PHONES, ALERT_ID  # noqa: E402
+from test_fanout import FanoutTestCase, PHONES, ALERT_ID, SENT_AT as FANOUT_SENT_AT, ALERT_TS  # noqa: E402
 
 PHONE_SHAPED = re.compile(r"\+?\d{10,}")
 
@@ -131,7 +131,7 @@ class ComposerDiscordSkipPostHogTest(DiscordBase):
 
     def event(self, eid="e1", **detail):
         return {"id": eid, "source": "fob-site-monitor", "detail-type": "SiteChange", "time": "2026-11-06T17:21:03Z",
-                "detail": {"campaign_id": CAMPAIGN, "changes": CHANGES, "detected_at": "2026-11-06T17:21:03Z", **detail}}
+                "detail": {"campaign_id": CAMPAIGN, "changes": CHANGES, "detected_at": "2026-11-06T17:21:%02dZ" % (sum(map(ord, eid)) % 60), **detail}}
 
     def test_test_event_fires_skipped(self):
         ac.handler(self.event("a", test=True), None)
@@ -155,7 +155,26 @@ class ComposerDiscordSkipPostHogTest(DiscordBase):
         skipped = self.spy.named("alert_discord_skipped")
         self.assertTrue(skipped)
         self.assertEqual(self.spy.named("alert_discord_posted"), [])
+        sms = self.spy.named("alert_sms_skipped")
+        self.assertEqual(len(sms), 1)
+        _, did, props = sms[0]
+        self.assertEqual(did, f"alert:{CAMPAIGN}:{res['sent_at']}")
+        self.assertEqual(props["channel"], "sms")
+        self.assertTrue(props["skipped"])
+        self.assertEqual(props["skipped_reason"], "model:notify_false")
+        self.assertEqual(self.spy.named("alert_sms_blast"), [])
         self.assertIsNone(PHONE_SHAPED.search(self.spy.blob()))
+
+    def test_fanout_mode_off_fires_sms_skipped_not_blast(self):
+        # Default ops config is fanout_mode off (missing). Published alert enqueues nothing.
+        self.ops.put_item(Item={"pk": "config#global", "sk": "current", "fanout_mode": "off",
+                                "broadcast_enabled": True, "waitlist_mode": False})
+        store.reset_config_cache()
+        res = ac.handler(self.event("off"), None)
+        self.assertEqual(res["status"], "published")
+        sms = self.spy.named("alert_sms_skipped")
+        self.assertTrue(any(p.get("skipped_reason") == "off" for _, _, p in sms))
+        self.assertEqual(self.spy.named("alert_sms_blast"), [])
 
 
 class FanoutPostHogTest(FanoutTestCase):
@@ -233,6 +252,51 @@ class FanoutPostHogTest(FanoutTestCase):
         self.run_job()
         self.assertEqual(posts, [])
         self.assertEqual(len(self.recipients_texted()), 4)
+
+    def test_gate_skip_fires_sms_skipped(self):
+        self.set_config(fanout_mode="live", broadcast_enabled=False, waitlist_mode=False)
+        res = self.run_job()
+        self.assertEqual(res.get("skipped"), "broadcast_disabled")
+        skipped = self.spy.named("alert_sms_skipped")
+        self.assertEqual(len(skipped), 1)
+        _, did, props = skipped[0]
+        self.assertEqual(did, f"alert:{CAMPAIGN}:{FANOUT_SENT_AT}")
+        self.assertEqual(props["channel"], "sms")
+        self.assertTrue(props["skipped"])
+        self.assertEqual(props["skipped_reason"], "broadcast_disabled")
+        self.assertEqual(props["fanout_mode"], "live")
+        self.assertEqual(self.spy.named("alert_sms_blast"), [])
+        self.assertIsNone(PHONE_SHAPED.search(self.spy.blob()))
+
+    def test_refuse_daily_cap_fires_sms_skipped(self):
+        self.live(max_public_alerts_per_day=1)
+        self.ops.put_item(Item={"pk": f"rl#fanout#{CAMPAIGN}", "sk": "d#20261108", "cnt": 1})
+        res = self.run_job()
+        self.assertEqual(res.get("refused"), "daily_cap")
+        skipped = self.spy.named("alert_sms_skipped")
+        self.assertEqual(len(skipped), 1)
+        self.assertEqual(skipped[0][2]["skipped_reason"], "daily_cap")
+        self.assertEqual(self.spy.named("alert_sms_blast"), [])
+
+    def test_refuse_too_old_fires_sms_skipped(self):
+        self.live(fanout_max_alert_age_minutes=1)
+        self.clock.t = ALERT_TS + 120  # 2 minutes old
+        res = self.run_job()
+        self.assertEqual(res.get("refused"), "alert_too_old")
+        skipped = self.spy.named("alert_sms_skipped")
+        self.assertEqual(skipped[0][2]["skipped_reason"], "alert_too_old")
+
+    def test_park_paused_fires_sms_skipped(self):
+        self.live()
+        # Start a continuation-style park via process with paused after seq>0 path:
+        # seq 0 with paused before run: process parks immediately.
+        self.set_config(fanout_mode="live", broadcast_enabled=True, waitlist_mode=False, fanout_paused=True)
+        res = self.run_job()
+        self.assertEqual(res.get("parked"), "paused")
+        skipped = self.spy.named("alert_sms_skipped")
+        self.assertEqual(len(skipped), 1)
+        self.assertEqual(skipped[0][2]["skipped_reason"], "parked:paused")
+        self.assertEqual(self.spy.named("alert_sms_blast"), [])
 
 
 if __name__ == "__main__":

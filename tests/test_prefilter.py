@@ -60,6 +60,14 @@ class SuppressedTest(unittest.TestCase):
     def test_markup_only(self):
         self.check([{"url": H + "/", "html_diff": "-js-view-dom-id-aaa\n+js-view-dom-id-bbb"}], "markup_only")
 
+    def test_markup_only_region_reorder_with_no_new_tokens(self):
+        # Same quoted country/region tokens, just reordered in the JS array — still markup_only.
+        diff = ('-                "Czech Republic", "Czechia", "CZ",\n'
+                '-                "Hungary", "HU"\n'
+                '+                "Hungary", "HU",\n'
+                '+                "Czech Republic", "Czechia", "CZ"')
+        self.check([{"url": H + "/tour", "html_diff": diff}], "markup_only")
+
     def test_link_only_one_for_one_swap_across_pages(self):
         nav = {"links_added": [MALL], "links_removed": ["javascript:void(0)"],
                "html_diff": "-<a href=\"javascript:void(0)\">Twilight Town Mall</a>\n+<a href=\"" + MALL + "\">"}
@@ -85,6 +93,33 @@ class KeptForModelTest(unittest.TestCase):
         self.keep([{"url": H + "/tour", "visible_text_diff": "+Nov 20 - Chicago"}])
         self.keep([{"url": H + "/", "links_added": [H + "/aces-hifi-records"],
                     "new_linked_pages": [{"url": H + "/aces-hifi-records", "status": 200, "excerpt": "store 04"}]}])
+
+    def test_tour_page_new_region_names_reach_the_model(self):
+        # Fixture from 2026-11-09 ~18:51Z: region labels appearing on /tour (and mirrored pages).
+        # Must not be prefilter link_only / title_or_asset_swap; the model decides notify.
+        vtd = ("@@ -8,5 +8,2 @@\n Twilight Town Mall\n-All\n-US + Canada\n-EU+UK\n PRE-SALE:\n"
+               "@@ -19,2 +16,5 @@\n NORTH AMERICA GENERAL ON SALE BEGINS THUR NOV 12 @ 10AM LOCAL TIME\n"
+               "+All\n+US + Canada\n+EU+UK\n view more dates")
+        added = ("@@ -8,4 +8,7 @@\n Twilight Town Mall\n All\n US + Canada\n EU+UK\n"
+                 "+Australia + NZ\n+Latin America\n+Asia\n PRE-SALE:\n view more dates")
+        self.keep([{"url": H + "/", "visible_text_diff": vtd, "html_diff": "+EU+UK"},
+                   {"url": H + "/tour", "visible_text_diff": vtd, "html_diff": "+EU+UK"},
+                   {"url": H + "/?frontpage=true", "visible_text_diff": vtd, "html_diff": "+EU+UK"}])
+        self.keep([{"url": H + "/tour", "visible_text_diff": added, "html_diff": "+Australia + NZ"}])
+
+    def test_js_tour_region_country_additions_reach_the_model(self):
+        # Event e48cce11 (2026-11-09 19:31Z): europe JS array gained Czechia + Hungary with no
+        # visible_text_diff. Must not be prefilter:markup_only — the model decides notify.
+        diff = ('-                "Czech Republic", "CZ",\n'
+                '+                "Czech Republic", "Czechia", "CZ",\n'
+                '+                "Hungary", "HU"')
+        pages = [
+            {"url": H + "/", "html_diff": diff},
+            {"url": H + "/tour", "html_diff": diff},
+            {"url": H + "/?frontpage=true", "html_diff": diff},
+        ]
+        self.keep(pages)
+        self.keep([{"url": H + "/tour", "html_diff": diff}])
 
     def test_newly_reachable_hidden_page_is_kept(self):
         self.keep([{"url": H + "/node/812", "status": {"before": 404, "after": 200},
@@ -118,6 +153,49 @@ class KeptForModelTest(unittest.TestCase):
     def test_empty_or_malformed_input_is_never_filtered(self):
         for bad in (None, [], {}, "x", [None], [{"url": H + "/", "html_diff": "x"}, "oops"]):
             self.keep(bad)
+
+
+M = "https://twilighttownmall.falloutboy.com"
+
+
+class MallHostTest(unittest.TestCase):
+    """twilighttownmall.falloutboy.com is first-class: same junk rules, real content reaches the model."""
+
+    def test_junk_on_mall_host_is_still_suppressed(self):
+        flip_mall = {"url": M + "/phase2", "status": {"before": 403, "after": 404}}
+        self.assertEqual(prefilter.evaluate([flip_mall]), "status_flip")
+        self.assertEqual(prefilter.evaluate([{"url": M + "/", "html_diff": "-js-view-dom-id-aaa\n+js-view-dom-id-bbb"}]),
+                         "markup_only")
+        self.assertEqual(prefilter.evaluate([{"url": M + "/sitemap.xml", "sitemap_urls_added": [M + "/new"]}]),
+                         "system_file")
+        self.assertEqual(prefilter.evaluate([{"url": M + "/foodcourt", "title": {"before": "A", "after": "B"}}]),
+                         "title_or_asset_swap")
+
+    def test_cookie_banner_markup_on_mall_host_is_suppressed(self):
+        self.assertEqual(prefilter.evaluate([{"url": M + "/", "html_diff":
+                         "-<div id=\"onetrust-banner-sdk\">Cookies</div>\n+<div id=\"onetrust-banner-sdk\" class=\"x\">Cookies</div>"}]),
+                         "markup_only")
+
+    def test_real_mall_content_is_kept_for_the_model(self):
+        for change in (
+            {"url": M + "/lost-and-found", "visible_text_diff": "+A new note was found: meet at midnight"},
+            {"url": M + "/", "links_added": [M + "/newstore"],
+             "new_linked_pages": [{"url": M + "/newstore", "status": 200, "excerpt": "STORE 07"}]},
+            {"url": M + "/", "status": {"before": 503, "after": 200}},
+            {"url": M + "/phase2", "status": {"before": 403, "after": 200},
+             "new_page_excerpt": "Phase 2 begins"},
+            {"url": M + "/boxoffice", "media_added": [M + "/sites/g/files/x/files/new-poster.png"]},
+        ):
+            self.assertIsNone(prefilter.evaluate([change]), change)
+
+    def test_main_site_redirect_to_mall_still_reaches_model_on_primary_pages(self):
+        # Already-baselined moves are quiet; a primary page flipping to a redirect is judged by the model.
+        move = {"url": H + "/boxoffice", "status": {"before": 200, "after": 301},
+                "location": {"before": None, "after": M + "/boxoffice"}}
+        self.assertIsNone(prefilter.evaluate([move]))
+
+    def test_tickets_on_main_site_still_kept(self):
+        self.assertIsNone(prefilter.evaluate([{"url": H + "/tour", "visible_text_diff": "+Nov 20 - Chicago ON SALE"}]))
 
 
 if __name__ == "__main__":

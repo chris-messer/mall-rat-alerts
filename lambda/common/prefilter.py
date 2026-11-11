@@ -28,6 +28,16 @@ NODE_PATH = re.compile(r"^/node/\d+$")
 FAN_WORDS = re.compile(
     r"\b(tour|tickets?|presale|album|single|song|music|video|vinyl|merch|store|shop|stream|"
     r"pre-?order|aces|puzzle|password|unlock)", re.I)
+# Quoted JS/HTML tokens that look like places or dates (tour region lists often live only in markup).
+_QUOTED = re.compile(r'"([^"\\]{1,60})"')
+_MONTH = re.compile(
+    r"^(January|February|March|April|May|June|July|August|September|October|November|December|"
+    r"Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\.?$", re.I)
+_DATE_LIKE = re.compile(
+    r"^(\d{1,2}[/-]\d{1,2}([/-]\d{2,4})?|\d{4}-\d{2}-\d{2}|\d{1,2}\s+"
+    r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?(\s+\d{2,4})?)$", re.I)
+_REGION_CODE = re.compile(r"^[A-Z]{2}$")
+_PLACE_NAME = re.compile(r"^[A-Z][A-Za-z]+(?:[ '-][A-Z][A-Za-z]+)*$")
 
 
 def _path(url):
@@ -77,6 +87,58 @@ def _title_echo(change):
     return all(l in titles for l in lines)
 
 
+def _diff_sides(diff):
+    """Split a unified diff into (added_text, removed_text), ignoring file headers."""
+    added, removed = [], []
+    for line in (diff or "").splitlines():
+        if line.startswith(("+++", "---")):
+            continue
+        if line.startswith("+"):
+            added.append(line[1:])
+        elif line.startswith("-"):
+            removed.append(line[1:])
+    return "\n".join(added), "\n".join(removed)
+
+
+def _place_or_date_token(token):
+    """True for country/city-like names, 2-letter region codes, month names, or date-like strings."""
+    t = (token or "").strip()
+    if not t:
+        return False
+    if _MONTH.match(t) or _DATE_LIKE.match(t) or _REGION_CODE.match(t):
+        return True
+    return bool(_PLACE_NAME.match(t))
+
+
+def _new_place_or_date_content(change):
+    """True when html_diff / visible_text_diff adds a place or date token absent from the removed side.
+
+    Tour region maps often live only in page JS, so a markup-only diff that newly quotes \"Czechia\"
+    or \"Hungary\" is still worth a model look. Reorders of the same tokens do not match.
+    """
+    added_parts, removed_parts = [], []
+    for key in ("html_diff", "visible_text_diff"):
+        a, r = _diff_sides(change.get(key))
+        if a:
+            added_parts.append(a)
+        if r:
+            removed_parts.append(r)
+    added, removed = "\n".join(added_parts), "\n".join(removed_parts)
+    if not added:
+        return False
+    removed_quoted = set(_QUOTED.findall(removed))
+    for tok in _QUOTED.findall(added):
+        if tok not in removed_quoted and _place_or_date_token(tok):
+            return True
+    # Unquoted month/date fragments in added lines (e.g. +Nov 20 - Chicago) that are new.
+    removed_l = removed.lower()
+    for line in added.splitlines():
+        for word in re.findall(r"[A-Za-z]{3,}|[\d][^\s,]{0,20}", line):
+            if _place_or_date_token(word) and word.lower() not in removed_l:
+                return True
+    return False
+
+
 def _rule_for(change):
     """Return the rule name when this single change is junk, else None."""
     path = _path(change.get("url"))
@@ -100,8 +162,11 @@ def _rule_for(change):
             and (not keys & {"media_added", "media_removed"} or _asset_swap(change)):
         return "title_or_asset_swap"
 
-    # Nothing a visitor can see changed (scripts, styles, hashes, whitespace).
+    # Nothing a visitor can see changed (scripts, styles, hashes, whitespace) — unless the markup
+    # newly introduces place/date tokens (tour region JS lists, embedded date strings).
     if keys <= {"url", "html_diff"}:
+        if _new_place_or_date_content(change):
+            return None
         return "markup_only"
 
     # Only links changed: no new page was followed, no new visible text, no new media.

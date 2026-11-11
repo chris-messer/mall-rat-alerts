@@ -3,10 +3,14 @@
 EventBridge (default bus) -> this Lambda, for events {source: "fob-site-monitor", detail-type: "SiteChange"}.
 
   1. Idempotency marker keyed on the source event id (a duplicate delivery does nothing).
+  1b. Hard guard on (campaign_id, detail.detected_at): a second event for the same detection is stored as
+     status=suppressed, suppressed_reason="duplicate:same_detection" (no model, no SMS, no Discord).
   2. Fetch the public template live from DynamoDB (falls back to the copy shipped with the code).
   2b. Deterministic pre-filter (common/prefilter.py): obviously unimportant changes (sitemap/robots, 403/404 flips
      on hidden pages, title-only, link-only, markup-only) skip the model and are stored as status=suppressed with
      suppressed_reason="prefilter:<rule>".
+  2c. Add a bounded context of recent published alerts (48h, newest first, max 10, suppressed as a count only)
+     so the model can skip information already announced. Fail-open: a read error means no context.
   3. Ask Bedrock (Nova first) for {"notify", "what_changed", "note"}, tracing every attempt to PostHog.
   4. Assemble "what_changed\\n\\nnote" in code, sanitize to GSM-7, enforce the length budget.
   5. Store the alert in the alerts table (the homepage feed reads it). Model notify=false is stored as
@@ -53,6 +57,10 @@ DEFAULT_CAMPAIGN_ID = os.environ.get("DEFAULT_CAMPAIGN_ID", "fob-twilight-town-m
 APP = "mall-rat-alerts"
 DISTINCT_ID = "mall-rat-alerts-composer"
 MARKER_TTL_DAYS = 30
+CONTEXT_HOURS = 48
+CONTEXT_MAX_ALERTS = 10
+CONTEXT_PAGE_LIMIT = 50
+CONTEXT_MAX_PAGES = 3
 
 _SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{2,63}$")
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -64,7 +72,7 @@ DEFAULTS = {
     "max_tokens": 500,
     "version": 0,
     "fallback_note": "Thnks fr th mmrs.",
-    "visit_what": "The Visit tab on falloutboy.com is now clickable. Go take a look: falloutboy.com",
+    "visit_what": "The Visit tab on the mall site is now clickable. Go take a look: twilighttownmall.falloutboy.com",
     "visit_note": "Light 'em up.",
 }
 
@@ -150,11 +158,65 @@ def fallback_parts(changes, tpl):
     return what, str(tpl.get("fallback_note") or DEFAULTS["fallback_note"])
 
 
-def user_text_for(changes):
-    return "Changes detected:\n" + json.dumps(changes, indent=1)[:24000]
+def recent_alerts(alerts_table, campaign_id, now=None):
+    """Recent public alerts for the model's context: {"alerts": [newest-first published, max 10], "suppressed": n}.
+    Bounded Query (48h window, a few pages). Never raises: on any read error returns None (fail-open)."""
+    now = time.time() if now is None else now
+    since = _iso(now - CONTEXT_HOURS * 3600)
+    published, suppressed, kwargs = [], 0, {}
+    try:
+        for _ in range(CONTEXT_MAX_PAGES):
+            res = alerts_table.query(
+                KeyConditionExpression="campaign_id = :c AND sent_at >= :s",
+                ExpressionAttributeValues={":c": campaign_id, ":s": since},
+                ProjectionExpression="sent_at, #st, what_changed, note, is_test, fallback",
+                ExpressionAttributeNames={"#st": "status"},
+                # Strongly consistent: an alert stored a second ago (a twin event) must be visible here.
+                ConsistentRead=True,
+                ScanIndexForward=False, Limit=CONTEXT_PAGE_LIMIT, **kwargs)
+            for i in res.get("Items", []):
+                if i.get("is_test"):
+                    continue
+                if i.get("status") == "suppressed":
+                    suppressed += 1
+                elif i.get("status") in ("published", "sent") and not i.get("fallback") and i.get("what_changed"):
+                    published.append(i)
+            if "LastEvaluatedKey" not in res:
+                break
+            kwargs["ExclusiveStartKey"] = res["LastEvaluatedKey"]
+    except Exception as e:
+        log.warning(json.dumps({"context": "recent_alerts_unavailable", "error": type(e).__name__}))
+        return None
+    published.sort(key=lambda i: str(i.get("sent_at", "")), reverse=True)
+    return {"alerts": published[:CONTEXT_MAX_ALERTS], "suppressed": suppressed}
 
 
-def build_alert(bedrock, template, campaign_id, changes, priority=False, trace_props=None):
+def context_text(ctx, now=None):
+    """Prompt block for the recent-alerts context ("" when there is nothing to say).
+    Includes the current time so the model can judge "within the last 30 minutes" repeats."""
+    if not ctx or not (ctx.get("alerts") or ctx.get("suppressed")):
+        return ""
+    now_txt = _iso(time.time() if now is None else now)[:16].replace("T", " ") + "Z"
+    lines = [f"Current time: {now_txt}",
+             "Recent alerts already sent to fans (last %d hours, newest first):" % CONTEXT_HOURS]
+    for i in ctx.get("alerts") or []:
+        when = str(i.get("sent_at", ""))[:16].replace("T", " ") + "Z"
+        what = alert_text.one_line(str(i.get("what_changed", "")))[:200]
+        note = alert_text.one_line(str(i.get("note", "")))[:60]
+        lines.append(f"- {when}: {what}" + (f" ({note})" if note else ""))
+    if not ctx.get("alerts"):
+        lines.append("- none")
+    n = int(ctx.get("suppressed") or 0)
+    if n:
+        lines.append(f"({n} other changes in this window were judged not worth a text and were not sent.)")
+    return "\n".join(lines) + "\n\n"
+
+
+def user_text_for(changes, context=None):
+    return context_text(context) + "Changes detected:\n" + json.dumps(changes, indent=1)[:24000]
+
+
+def build_alert(bedrock, template, campaign_id, changes, priority=False, trace_props=None, alerts_table=None):
     """Compose one public alert. Returns the fields that go on the stored alert (no keys, no status)."""
     tpl = {**DEFAULTS, **template}
     max_chars, target = int(tpl["max_chars"]), int(tpl["target_chars"])
@@ -178,11 +240,15 @@ def build_alert(bedrock, template, campaign_id, changes, priority=False, trace_p
         # publicly. Model notify=false is different: store a suppressed audit row, no generic fallback
         # text, and no SMS/Discord fan-out (handler gates on status).
         try:
-            res = alert_text.compose(bedrock, trace, tpl, user_text_for(changes), model_order(tpl), "public",
+            context = recent_alerts(alerts_table, campaign_id) if alerts_table is not None else None
+            res = alert_text.compose(bedrock, trace, tpl, user_text_for(changes, context), model_order(tpl), "public",
                                      {"campaign_id": campaign_id, "template_version": tpl.get("version"), "app": APP})
         except Exception as e:
             log.exception("compose raised, using fallback template")
             res, fallback_reason = None, f"compose error: {type(e).__name__}"
+        if res:
+            # Model "signoff" (valid, capped) wins; else its legacy "note"; fixed lines only on fallback.
+            res["note"] = res.get("signoff") or res["note"]
         if res and res["notify"] is not False:
             what, note, model = res["what_changed"], res["note"], res["model"]
             model_notify, attempts = res["notify"], res["attempts"]
@@ -270,6 +336,50 @@ def release(alerts_table, source_event_id):
         log.warning("could not release marker for %s", source_event_id)
 
 
+def detection_marker_key(campaign_id, detected_at):
+    return {"campaign_id": f"det#{campaign_id}#{detected_at}", "sent_at": "marker"}
+
+
+def claim_detection(alerts_table, campaign_id, detected_at, source_event_id):
+    """Hard guard, independent of the model: one detection (campaign + detected_at) makes one alert.
+    True the first time, or when detected_at is missing/unusable (nothing to key on, so fail open).
+    A second event carrying the same detected_at (a twin from the monitor) returns False."""
+    if not isinstance(detected_at, str) or not detected_at.strip():
+        return True
+    try:
+        alerts_table.put_item(
+            Item={**detection_marker_key(campaign_id, detected_at), "source_event_id": source_event_id,
+                  "created_at": _iso(time.time()), "expires_at": int(time.time()) + MARKER_TTL_DAYS * 86400},
+            ConditionExpression="attribute_not_exists(campaign_id)")
+        return True
+    except Exception as e:
+        if getattr(e, "response", {}).get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return False
+        log.warning(json.dumps({"guard": "detection_claim_failed", "error": type(e).__name__}))
+        return True  # fail open: the model-side repeat guidance still applies
+
+
+def release_detection(alerts_table, campaign_id, detected_at):
+    if not isinstance(detected_at, str) or not detected_at.strip():
+        return
+    try:
+        alerts_table.delete_item(Key=detection_marker_key(campaign_id, detected_at))
+    except Exception:
+        log.warning("could not release detection marker")
+
+
+def duplicate_detection_alert(campaign_id, changes, tpl):
+    """Audit-only fields for a twin event: no model call, never fanned out or posted."""
+    what, note = fallback_parts(changes, tpl)
+    max_chars, target = int(tpl["max_chars"]), int(tpl["target_chars"])
+    message, info = alert_text.assemble(what, note, "public", max_chars, target)
+    what_out, _, note_out = message.partition(alert_text.SEP)
+    return {"message": message, "discord_message": message, "what_changed": what_out, "note": note_out,
+            "urls": _urls(changes), "segments": info["segments"], "encoding": info["encoding"],
+            "units": info["units"], "template_version": tpl.get("version"), "model": "guard",
+            "fallback": False, "suppressed": True, "suppressed_reason": "duplicate:same_detection"}
+
+
 def sqs_client():
     if "c" not in _sqs:
         _sqs["c"] = boto3.client("sqs")
@@ -281,10 +391,14 @@ def fanout_hook(alert, cfg=None):
     Mode "off" (the default, and what a missing config means) enqueues nothing. Never raises: the alert is
     already stored and the feed must not depend on SMS."""
     mode = fanout.mode_of(cfg)
-    if mode == "off" or not alert.get("campaign_id") or not alert.get("sent_at"):
+    cid, sent_at = alert.get("campaign_id"), alert.get("sent_at")
+    if mode == "off" or not cid or not sent_at:
+        if cid and sent_at:
+            _sms_skipped(cid, sent_at, "off" if mode == "off" else "missing_keys", fanout_mode=mode)
         return None
     if not FANOUT_QUEUE_URL:
         log.warning(json.dumps({"fanout": "enqueue_skipped", "reason": "no_queue", "mode": mode}))
+        _sms_skipped(cid, sent_at, "no_queue", fanout_mode=mode)
         return None
     delay = fanout.delay_seconds(cfg)
     job = {"v": 1, "campaign_id": alert["campaign_id"], "sent_at": alert["sent_at"], "seq": 0,
@@ -317,6 +431,16 @@ def _discord_skipped(campaign_id, sent_at, reason):
             "skipped": True, "skipped_reason": reason})
     except Exception as e:
         log.warning("discord skip posthog track failed (%s)", type(e).__name__)
+
+
+def _sms_skipped(campaign_id, sent_at, reason, **props):
+    """PostHog when composer decides SMS will not be enqueued. Mirrors alert_discord_skipped. Fail-open."""
+    try:
+        analytics.capture("alert_sms_skipped", analytics.alert_distinct_id(campaign_id, sent_at), {
+            "campaign_id": campaign_id, "alert_id": sent_at, "channel": "sms",
+            "skipped": True, "skipped_reason": reason, **{k: v for k, v in props.items() if v is not None}})
+    except Exception as e:
+        log.warning("sms skip posthog track failed (%s)", type(e).__name__)
 
 
 def discord_hook(alerts_table, fields, campaign_id, sent_at, cfg, is_test, event_dry_run=False):
@@ -355,10 +479,19 @@ def handler(event, context):
     if not claim(t["alerts"], source_event_id):
         log.info("duplicate source event %s, skipping", source_event_id)
         return {"duplicate": True, "source_event_id": source_event_id}
+    detected_at = detail.get("detected_at")
+    first_detection = claim_detection(t["alerts"], campaign_id, detected_at, source_event_id)
     try:
         tpl = load_template(t["templates"], campaign_id)
-        built = build_alert(bedrock_client(), tpl, campaign_id, changes, bool(detail.get("priority")),
-                            {"source_event_id": source_event_id, "is_test": is_test or None})
+        if first_detection:
+            built = build_alert(bedrock_client(), tpl, campaign_id, changes, bool(detail.get("priority")),
+                                {"source_event_id": source_event_id, "is_test": is_test or None},
+                                alerts_table=t["alerts"])
+        else:
+            # Same campaign + detected_at already produced an alert: keep an audit row, send nothing.
+            log.info(json.dumps({"alert": "suppressed", "reason": "duplicate:same_detection",
+                                 "campaign_id": campaign_id, "source_event_id": source_event_id}))
+            built = duplicate_detection_alert(campaign_id, changes, {**DEFAULTS, **tpl})
         status = "suppressed" if built.get("suppressed") else "published"
         fields = {
             **{k: v for k, v in built.items()
@@ -375,6 +508,8 @@ def handler(event, context):
         sent_at = put_alert(t["alerts"], campaign_id, _parse_time(event.get("time") or detail.get("detected_at")), fields)
     except Exception:
         release(t["alerts"], source_event_id)
+        if first_detection:
+            release_detection(t["alerts"], campaign_id, detected_at)
         log.exception("compose failed for %s", source_event_id)
         raise
     try:
@@ -387,7 +522,9 @@ def handler(event, context):
         fanout_hook({**fields, "campaign_id": campaign_id, "sent_at": sent_at}, cfg)
         discord_hook(t["alerts"], fields, campaign_id, sent_at, cfg, is_test, bool(detail.get("dry_run")))
     else:
-        _discord_skipped(campaign_id, sent_at, fields.get("suppressed_reason") or "suppressed")
+        reason = fields.get("suppressed_reason") or "suppressed"
+        _discord_skipped(campaign_id, sent_at, reason)
+        _sms_skipped(campaign_id, sent_at, reason)
     return {"stored": True, "campaign_id": campaign_id, "sent_at": sent_at, "segments": built["segments"],
             "encoding": built["encoding"], "model": built["model"], "test": is_test,
             "status": fields.get("status")}

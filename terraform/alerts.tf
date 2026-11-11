@@ -177,6 +177,12 @@ resource "aws_iam_role_policy" "composer" {
         Resource = aws_dynamodb_table.alerts.arn
       },
       {
+        # Recent published alerts, read as context for the model (bounded Query on the alerts table).
+        Effect   = "Allow"
+        Action   = ["dynamodb:Query"]
+        Resource = aws_dynamodb_table.alerts.arn
+      },
+      {
         # Discord webhook URLs live in this secret (key discord_webhook_*). Only this secret, read only.
         Effect   = "Allow"
         Action   = ["secretsmanager:GetSecretValue"]

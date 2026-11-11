@@ -232,7 +232,7 @@ class ComposerGatingTest(Base):
 
     def event(self, eid="e1", **detail):
         return {"id": eid, "source": "fob-site-monitor", "detail-type": "SiteChange", "time": "2026-11-06T17:21:03Z",
-                "detail": {"campaign_id": CAMPAIGN, "changes": CHANGES, "detected_at": "2026-11-06T17:21:03Z", **detail}}
+                "detail": {"campaign_id": CAMPAIGN, "changes": CHANGES, "detected_at": "2026-11-06T17:21:%02dZ" % (sum(map(ord, eid)) % 60), **detail}}
 
     def test_real_event_posts_after_fanout_with_stored_text(self):
         order = []
